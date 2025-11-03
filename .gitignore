@@ -9,7 +9,7 @@ lerna-debug.log*
 
 # Dependencies
 node_modules
-package-lock.json
+# package-lock.json - Keep this file! GitHub Actions needs it
 yarn.lock
 pnpm-lock.yaml
 
