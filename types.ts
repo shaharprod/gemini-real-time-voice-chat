@@ -4,6 +4,7 @@ export enum AppStatus {
   CONNECTING = 'connecting',
   LISTENING = 'listening',
   SPEAKING = 'speaking',
+  TRANSCRIBING = 'transcribing',
   ERROR = 'error',
 }
 

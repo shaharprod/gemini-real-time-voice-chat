@@ -70,6 +70,8 @@ export const useVoiceChat = () => {
   const outputAudioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const isDictationModeRef = useRef<boolean>(false);
   
   const currentTurnIdRef = useRef<string | null>(null);
   const currentInputTranscriptionRef = useRef('');
@@ -78,8 +80,126 @@ export const useVoiceChat = () => {
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
+  const startDictationOnly = useCallback(() => {
+    if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
+
+    // Check if browser supports Speech Recognition API
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError('Speech Recognition API is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+
+    setStatus(AppStatus.TRANSCRIBING);
+    setError(null);
+    isDictationModeRef.current = true;
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'he-IL'; // Hebrew, can be changed to 'en-US' or other languages
+
+      let currentUserText = '';
+      let currentTurnId = Date.now().toString();
+
+      recognition.onstart = () => {
+        setStatus(AppStatus.TRANSCRIBING);
+      };
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        let finalTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+
+        currentUserText = finalTranscript || interimTranscript;
+
+        // Update transcript with user input only (no assistant response)
+        setTranscript(prev => {
+          const newTranscript = [...prev];
+          const turnIndex = newTranscript.findIndex(t => t.id === currentTurnId);
+          
+          if (turnIndex !== -1) {
+            newTranscript[turnIndex] = {
+              ...newTranscript[turnIndex],
+              user: currentUserText.trim(),
+              assistant: '', // No assistant response in dictation mode
+              isFinal: !!finalTranscript
+            };
+          } else if (currentUserText.trim()) {
+            newTranscript.push({
+              id: currentTurnId,
+              user: currentUserText.trim(),
+              assistant: '',
+              isFinal: !!finalTranscript
+            });
+          }
+
+          // Save to localStorage
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(newTranscript));
+          } catch (err) {
+            console.error('Failed to save history:', err);
+          }
+
+          return newTranscript;
+        });
+
+        // Start new turn for final results
+        if (finalTranscript) {
+          currentTurnId = Date.now().toString();
+          currentUserText = '';
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+          // This is common, just continue listening
+          return;
+        }
+        setError(`Speech recognition error: ${event.error}`);
+        setStatus(AppStatus.ERROR);
+      };
+
+      recognition.onend = () => {
+        if (isDictationModeRef.current && status === AppStatus.TRANSCRIBING) {
+          // Restart recognition if still in dictation mode
+          try {
+            recognition.start();
+          } catch (err) {
+            // Recognition might already be starting
+            console.log('Recognition already starting or stopped');
+          }
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err: any) {
+      console.error('Failed to start dictation:', err);
+      setError(err.message || 'Failed to initialize speech recognition.');
+      setStatus(AppStatus.ERROR);
+      isDictationModeRef.current = false;
+    }
+  }, [status]);
+
   const startConversation = useCallback(() => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
+
+    // Stop dictation mode if active
+    if (isDictationModeRef.current && recognitionRef.current) {
+      recognitionRef.current.stop();
+      isDictationModeRef.current = false;
+    }
 
     setStatus(AppStatus.CONNECTING);
     setError(null);
@@ -190,6 +310,12 @@ export const useVoiceChat = () => {
   }, [status]);
 
   const stopConversation = useCallback(() => {
+    // Stop dictation mode if active
+    if (isDictationModeRef.current && recognitionRef.current) {
+      recognitionRef.current.stop();
+      isDictationModeRef.current = false;
+    }
+    
     if (sessionPromiseRef.current) {
       sessionPromiseRef.current.then(session => session.close());
       sessionPromiseRef.current = null;
@@ -198,6 +324,17 @@ export const useVoiceChat = () => {
   }, []);
 
   const cleanup = useCallback(() => {
+    // Stop dictation mode
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (err) {
+        // Recognition might already be stopped
+      }
+      recognitionRef.current = null;
+    }
+    isDictationModeRef.current = false;
+    
     setStatus(AppStatus.IDLE);
     
     // Stop microphone stream
@@ -321,6 +458,42 @@ export const useVoiceChat = () => {
     } catch (err) {
       console.error('Failed to save history to file:', err);
       throw new Error('Failed to save history to file');
+    }
+  }, [transcript]);
+
+  const saveHistoryToTxt = useCallback(() => {
+    try {
+      if (transcript.length === 0) {
+        throw new Error('No conversation history to export');
+      }
+
+      let textContent = '';
+      
+      transcript.forEach((turn, index) => {
+        if (turn.user.trim()) {
+          textContent += `User: ${turn.user}\n`;
+        }
+        if (turn.assistant.trim()) {
+          textContent += `Assistant: ${turn.assistant}\n`;
+        }
+        // Add separator between turns (except for the last one)
+        if (index < transcript.length - 1) {
+          textContent += '\n---\n\n';
+        }
+      });
+
+      const dataBlob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `gemini-chat-text-${new Date().toISOString().split('T')[0]}.txt`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to save history to TXT:', err);
+      throw new Error('Failed to save history to TXT file');
     }
   }, [transcript]);
 
@@ -510,9 +683,11 @@ export const useVoiceChat = () => {
     status, 
     transcript, 
     error, 
-    startConversation, 
+    startConversation,
+    startDictationOnly,
     stopConversation,
     saveHistoryToFile,
+    saveHistoryToTxt,
     clearHistory,
     loadHistoryFromFile,
     readHistoryAloud,

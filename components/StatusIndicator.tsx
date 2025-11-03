@@ -11,6 +11,7 @@ const statusConfig = {
   [AppStatus.CONNECTING]: { text: 'Connecting...', color: 'bg-yellow-500 animate-pulse' },
   [AppStatus.LISTENING]: { text: 'Listening...', color: 'bg-blue-500 animate-pulse' },
   [AppStatus.SPEAKING]: { text: 'Speaking...', color: 'bg-green-500' },
+  [AppStatus.TRANSCRIBING]: { text: 'Transcribing...', color: 'bg-purple-500 animate-pulse' },
   [AppStatus.ERROR]: { text: 'Error', color: 'bg-red-500' },
 };
 
