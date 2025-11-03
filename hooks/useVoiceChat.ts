@@ -46,9 +46,23 @@ async function decodeAudioData(
 }
 
 
+const STORAGE_KEY = 'gemini-voice-chat-history';
+
 export const useVoiceChat = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
-  const [transcript, setTranscript] = useState<ConversationTurn[]>([]);
+  const [transcript, setTranscript] = useState<ConversationTurn[]>(() => {
+    // Load saved history from localStorage on mount
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+    } catch (err) {
+      console.error('Failed to load saved history:', err);
+    }
+    return [];
+  });
   const [error, setError] = useState<string | null>(null);
 
   const sessionPromiseRef = useRef<Promise<Session> | null>(null);
@@ -92,7 +106,11 @@ export const useVoiceChat = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: 'You are a friendly and helpful voice assistant. Keep your responses concise.',
+          systemInstruction: 'You are a friendly and helpful voice assistant. You have access to real-time internet search through Google Search. When users ask about current events, recent information, or anything that requires up-to-date data, you can search the internet to provide accurate and current information. Keep your responses concise.',
+          // Enable Google Search grounding for real-time internet search
+          groundingConfig: {
+            mode: 'GROUNDING_MODE_SEARCH',
+          },
         },
         callbacks: {
           onopen: async () => {
@@ -265,15 +283,87 @@ export const useVoiceChat = () => {
             const turnIndex = newTranscript.findIndex(t => t.id === currentTurnIdRef.current);
             if (turnIndex !== -1) {
                 newTranscript[turnIndex] = { ...newTranscript[turnIndex], user: userText, assistant: assistantText, isFinal };
+                // Save to localStorage
+                try {
+                  localStorage.setItem(STORAGE_KEY, JSON.stringify(newTranscript));
+                } catch (err) {
+                  console.error('Failed to save history:', err);
+                }
                 return newTranscript;
             }
         }
         
         const newTurnId = Date.now().toString();
         currentTurnIdRef.current = newTurnId;
-        return [...newTranscript, { id: newTurnId, user: userText, assistant: assistantText, isFinal }];
+        const updated = [...newTranscript, { id: newTurnId, user: userText, assistant: assistantText, isFinal }];
+        // Save to localStorage
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        } catch (err) {
+          console.error('Failed to save history:', err);
+        }
+        return updated;
     });
   };
 
-  return { status, transcript, error, startConversation, stopConversation };
+  const saveHistoryToFile = useCallback(() => {
+    try {
+      const dataStr = JSON.stringify(transcript, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `gemini-chat-history-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to save history to file:', err);
+      throw new Error('Failed to save history to file');
+    }
+  }, [transcript]);
+
+  const clearHistory = useCallback(() => {
+    setTranscript([]);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (err) {
+      console.error('Failed to clear saved history:', err);
+    }
+  }, []);
+
+  const loadHistoryFromFile = useCallback((file: File) => {
+    return new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = e.target?.result as string;
+          const parsed = JSON.parse(content);
+          if (Array.isArray(parsed)) {
+            setTranscript(parsed);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            resolve();
+          } else {
+            reject(new Error('Invalid file format'));
+          }
+        } catch (err) {
+          reject(new Error('Failed to parse file'));
+        }
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsText(file);
+    });
+  }, []);
+
+  return { 
+    status, 
+    transcript, 
+    error, 
+    startConversation, 
+    stopConversation,
+    saveHistoryToFile,
+    clearHistory,
+    loadHistoryFromFile
+  };
 };

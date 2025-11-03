@@ -2,14 +2,24 @@
 import React, { useState } from 'react';
 import { useVoiceChat } from './hooks/useVoiceChat';
 import { AppStatus } from './types';
-import { MicrophoneIcon, StopIcon } from './components/Icons';
+import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon } from './components/Icons';
 import { StatusIndicator } from './components/StatusIndicator';
 import { Transcript } from './components/Transcript';
 
 const App: React.FC = () => {
-  const { status, transcript, error, startConversation, stopConversation } = useVoiceChat();
+  const { 
+    status, 
+    transcript, 
+    error, 
+    startConversation, 
+    stopConversation,
+    saveHistoryToFile,
+    clearHistory,
+    loadHistoryFromFile
+  } = useVoiceChat();
   const [hasPermission, setHasPermission] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleStart = async () => {
     try {
@@ -27,13 +37,84 @@ const App: React.FC = () => {
 
   const isConversationActive = status !== AppStatus.IDLE && status !== AppStatus.ERROR;
 
+  const handleSaveHistory = () => {
+    try {
+      saveHistoryToFile();
+    } catch (err) {
+      console.error('Failed to save history:', err);
+      alert('Failed to save history. Please try again.');
+    }
+  };
+
+  const handleClearHistory = () => {
+    if (window.confirm('Are you sure you want to clear all conversation history?')) {
+      clearHistory();
+    }
+  };
+
+  const handleLoadHistory = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      loadHistoryFromFile(file)
+        .then(() => {
+          alert('History loaded successfully!');
+        })
+        .catch((err) => {
+          console.error('Failed to load history:', err);
+          alert('Failed to load history. Please make sure the file is a valid JSON file.');
+        });
+      // Reset input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-2xl h-[90vh] flex flex-col bg-gray-800 rounded-2xl shadow-2xl overflow-hidden">
         <header className="flex-shrink-0 p-4 border-b border-gray-700 flex justify-between items-center">
           <h1 className="text-xl font-bold text-gray-200">Gemini Voice Assistant</h1>
-          <StatusIndicator status={status} />
+          <div className="flex items-center gap-2">
+            <StatusIndicator status={status} />
+            <div className="flex gap-2 ml-4">
+              <button
+                onClick={handleSaveHistory}
+                disabled={transcript.length === 0}
+                className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Save history to file"
+              >
+                <DownloadIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={handleLoadHistory}
+                className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors"
+                title="Load history from file"
+              >
+                <UploadIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={handleClearHistory}
+                disabled={transcript.length === 0}
+                className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Clear history"
+              >
+                <TrashIcon className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
         </header>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleFileSelected}
+          style={{ display: 'none' }}
+        />
 
         <main className="flex-1 overflow-y-auto p-6">
           <Transcript transcript={transcript} />

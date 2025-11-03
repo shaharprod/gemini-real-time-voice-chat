@@ -7,6 +7,9 @@ A real-time voice chat application powered by Google Gemini AI. Speak naturally 
 - 🎙️ **Real-time voice input** - Speak directly to the AI
 - 🔊 **Audio output** - Listen to AI responses
 - 💬 **Live transcription** - See your conversation as it happens
+- 🌐 **Internet search** - AI can search the web for current information
+- 💾 **History saving** - Automatically saves conversation history
+- 📥 **Export/Import** - Save and load conversation history as JSON
 - ⚡ **Fast & responsive** - Built with React and Vite
 - 🎨 **Modern UI** - Clean and intuitive interface
 
