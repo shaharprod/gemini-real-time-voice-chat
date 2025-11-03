@@ -73,8 +73,12 @@ export const useVoiceChat = () => {
 
     try {
       const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
-      if (!apiKey) {
-        throw new Error('GEMINI_API_KEY is not set. Please create a .env.local file with your Gemini API key.');
+      if (!apiKey || apiKey === '') {
+        const errorMsg = 'GEMINI_API_KEY is not set. ' + 
+          (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+            ? 'Please create a .env.local file with your Gemini API key.'
+            : 'Please configure GEMINI_API_KEY in GitHub Secrets for deployment.');
+        throw new Error(errorMsg);
       }
       const ai = new GoogleGenAI({ apiKey: apiKey as string });
       
@@ -93,28 +97,57 @@ export const useVoiceChat = () => {
         callbacks: {
           onopen: async () => {
             setStatus(AppStatus.LISTENING);
-            // Start streaming audio from microphone
-            mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const source = inputAudioContextRef.current!.createMediaStreamSource(mediaStreamRef.current);
-            scriptProcessorRef.current = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
-            
-            scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
-              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) {
-                int16[i] = inputData[i] * 32768;
+            try {
+              // Start streaming audio from microphone
+              const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              
+              // Verify we have valid AudioContext and MediaStream
+              if (!inputAudioContextRef.current) {
+                throw new Error('AudioContext not initialized');
               }
-              const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+              
+              // Resume AudioContext if suspended (browser autoplay policy)
+              if (inputAudioContextRef.current.state === 'suspended') {
+                await inputAudioContextRef.current.resume();
+              }
+              
+              if (!mediaStream || !mediaStream.getTracks().length) {
+                throw new Error('Failed to get media stream');
+              }
+              
+              // Verify MediaStream has active audio tracks
+              const audioTracks = mediaStream.getAudioTracks();
+              if (!audioTracks.length || audioTracks.every(track => track.readyState !== 'live')) {
+                throw new Error('No active audio tracks in media stream');
+              }
+              
+              mediaStreamRef.current = mediaStream;
+              const source = inputAudioContextRef.current.createMediaStreamSource(mediaStream);
+              scriptProcessorRef.current = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
+              
+              scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
+                const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                const l = inputData.length;
+                const int16 = new Int16Array(l);
+                for (let i = 0; i < l; i++) {
+                  int16[i] = inputData[i] * 32768;
+                }
+                const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
 
-              if (sessionPromiseRef.current) {
-                sessionPromiseRef.current.then((session) => {
-                  session.sendRealtimeInput({ media: pcmBlob });
-                });
-              }
-            };
-            source.connect(scriptProcessorRef.current);
-            scriptProcessorRef.current.connect(inputAudioContextRef.current!.destination);
+                if (sessionPromiseRef.current) {
+                  sessionPromiseRef.current.then((session) => {
+                    session.sendRealtimeInput({ media: pcmBlob });
+                  });
+                }
+              };
+              source.connect(scriptProcessorRef.current);
+              scriptProcessorRef.current.connect(inputAudioContextRef.current.destination);
+            } catch (error: any) {
+              console.error('Error setting up audio:', error);
+              setError(`Failed to set up microphone: ${error.message || 'Unknown error'}`);
+              setStatus(AppStatus.ERROR);
+              cleanup();
+            }
           },
           onmessage: async (message: LiveServerMessage) => {
             handleServerMessage(message);

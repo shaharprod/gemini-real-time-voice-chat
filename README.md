@@ -70,11 +70,77 @@ MIT License - feel free to use this project for your own purposes.
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## 🚀 Deployment
+
+### Deploy to Vercel
+
+1. Push your code to GitHub
+2. Import your repository in [Vercel](https://vercel.com)
+3. Add environment variable:
+   - Name: `GEMINI_API_KEY`
+   - Value: Your Gemini API key
+4. Click Deploy
+
+### Deploy to Netlify
+
+1. Push your code to GitHub
+2. Import your repository in [Netlify](https://netlify.com)
+3. Build settings:
+   - Build command: `npm run build`
+   - Publish directory: `dist`
+4. Add environment variable:
+   - Key: `GEMINI_API_KEY`
+   - Value: Your Gemini API key
+5. Click Deploy site
+
+### Deploy to GitHub Pages
+
+#### Option 1: Automatic Deployment with GitHub Actions (Recommended)
+
+1. Go to your repository settings on GitHub
+2. Navigate to **Settings** → **Secrets and variables** → **Actions**
+3. Add a new secret:
+   - Name: `GEMINI_API_KEY`
+   - Value: Your Gemini API key
+4. Push code to `main` branch - deployment happens automatically!
+5. Go to **Settings** → **Pages**
+6. Set source to: **GitHub Actions**
+7. Your site will be available at: `https://yourusername.github.io/gemini-real-time-voice-chat`
+
+#### Option 2: Manual Deployment
+
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Build and deploy:
+   ```bash
+   npm run deploy
+   ```
+3. Configure GitHub Pages in repository settings:
+   - Go to **Settings** → **Pages**
+   - Source: `gh-pages` branch
+   - Folder: `/ (root)`
+4. Your site will be available at: `https://yourusername.github.io/gemini-real-time-voice-chat`
+
 ## ⚠️ Important Notes
 
+### Security Warning ⚠️
+
+**This is a client-side application** - the API key will be visible in the browser's JavaScript code when deployed. 
+
+**Recommended security measures:**
+- Use API key restrictions (IP/Domain limits) in Google Cloud Console
+- Create a separate API key with low quotas for public demos
+- For production apps, use a backend proxy instead (see [SECURITY_WARNING.md](SECURITY_WARNING.md))
+
+### Other Notes
+
 - Make sure to keep your API key private - never commit `.env.local` to version control
+- When deploying, add `GEMINI_API_KEY` as an environment variable in your hosting platform
 - This app requires microphone permissions to function
 - Works best in modern browsers (Chrome, Firefox, Edge)
+- HTTPS is required for microphone access in production
 
 ## 🙏 Acknowledgments
 
