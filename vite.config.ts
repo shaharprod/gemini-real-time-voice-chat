@@ -12,7 +12,8 @@ export default defineConfig(({ mode }) => {
 
     // Get API key from environment (for GitHub Actions) or from env files (for local dev)
     // Priority: process.env (GitHub Actions) > env from files (local dev)
-    const apiKey = process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || '';
+    // Also check API_KEY for backwards compatibility
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || env.GEMINI_API_KEY || env.API_KEY || '';
 
     // Log warning if API key is missing in production
     if (process.env.NODE_ENV === 'production' && !apiKey) {
