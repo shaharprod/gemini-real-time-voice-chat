@@ -1,16 +1,15 @@
-# Commit ו-Push עם force (ידרוס את ה-remote)
-Write-Host "Checking git status..." -ForegroundColor Yellow
-git status
+# Commit and push to GitHub
+Write-Host "🚀 Committing and pushing changes..." -ForegroundColor Cyan
 
-Write-Host "`nAdding all changes..." -ForegroundColor Yellow
+Set-Location "c:\Users\User\Downloads\gemini-real-time-voice-chat (1)"
+
+Write-Host "`n1. Adding all changes..." -ForegroundColor Yellow
 git add .
 
-Write-Host "Committing changes..." -ForegroundColor Yellow
-git commit -m "Update: latest changes with Google Cloud fixes"
+Write-Host "2. Committing..." -ForegroundColor Yellow
+git commit -m "Add: Text-to-speech for history and TXT file reading functionality"
 
-Write-Host "Pushing to GitHub (force)..." -ForegroundColor Yellow
-git push origin main --force
+Write-Host "3. Pushing to GitHub..." -ForegroundColor Yellow
+git push origin main
 
-Write-Host "`n✅ Done! GitHub Actions should now deploy automatically." -ForegroundColor Green
-Write-Host "Check deployment at: https://github.com/shaharprod/gemini-real-time-voice-chat/actions" -ForegroundColor Cyan
-
+Write-Host "`n✅ Done! Changes pushed to GitHub." -ForegroundColor Green

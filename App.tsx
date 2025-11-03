@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { useVoiceChat } from './hooks/useVoiceChat';
 import { AppStatus } from './types';
-import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon } from './components/Icons';
+import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon, SpeakerIcon } from './components/Icons';
 import { StatusIndicator } from './components/StatusIndicator';
 import { Transcript } from './components/Transcript';
 
@@ -15,11 +15,17 @@ const App: React.FC = () => {
     stopConversation,
     saveHistoryToFile,
     clearHistory,
-    loadHistoryFromFile
+    loadHistoryFromFile,
+    readHistoryAloud,
+    stopReading,
+    isReading,
+    readTextFile,
+    loadTextFile
   } = useVoiceChat();
   const [hasPermission, setHasPermission] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const textFileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleStart = async () => {
     try {
@@ -74,6 +80,46 @@ const App: React.FC = () => {
     }
   };
 
+  const handleReadAloud = () => {
+    if (isReading) {
+      stopReading();
+    } else {
+      readHistoryAloud();
+    }
+  };
+
+  const handleLoadTextFile = () => {
+    textFileInputRef.current?.click();
+  };
+
+  const handleTextFileSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = e.target?.result as string;
+          if (content && content.trim()) {
+            readTextFile(content);
+          } else {
+            alert('File is empty or could not be read.');
+          }
+        } catch (err) {
+          console.error('Failed to read text file:', err);
+          alert('Failed to read text file. Please make sure the file is a valid text file.');
+        }
+      };
+      reader.onerror = () => {
+        alert('Failed to read file.');
+      };
+      reader.readAsText(file);
+      // Reset input
+      if (textFileInputRef.current) {
+        textFileInputRef.current.value = '';
+      }
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-2xl h-[90vh] flex flex-col bg-gray-800 rounded-2xl shadow-2xl overflow-hidden">
@@ -93,9 +139,32 @@ const App: React.FC = () => {
               <button
                 onClick={handleLoadHistory}
                 className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors"
-                title="Load history from file"
+                title="Load history from file (JSON)"
               >
                 <UploadIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={handleLoadTextFile}
+                className={`p-2 rounded-lg transition-colors ${
+                  isReading 
+                    ? 'text-purple-400 hover:text-purple-300 hover:bg-gray-700 bg-purple-900/30' 
+                    : 'text-gray-400 hover:text-purple-300 hover:bg-gray-700'
+                }`}
+                title={isReading ? "Stop reading" : "Load and read text file (TXT)"}
+              >
+                <SpeakerIcon className="w-5 h-5" />
+              </button>
+              <button
+                onClick={handleReadAloud}
+                disabled={transcript.length === 0}
+                className={`p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  isReading 
+                    ? 'text-blue-400 hover:text-blue-300 hover:bg-gray-700 bg-blue-900/30' 
+                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+                }`}
+                title={isReading ? "Stop reading" : "Read history aloud"}
+              >
+                <SpeakerIcon className="w-5 h-5" />
               </button>
               <button
                 onClick={handleClearHistory}
@@ -113,6 +182,13 @@ const App: React.FC = () => {
           type="file"
           accept=".json"
           onChange={handleFileSelected}
+          style={{ display: 'none' }}
+        />
+        <input
+          ref={textFileInputRef}
+          type="file"
+          accept=".txt,.text"
+          onChange={handleTextFileSelected}
           style={{ display: 'none' }}
         />
 

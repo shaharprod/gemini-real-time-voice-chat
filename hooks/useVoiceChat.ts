@@ -356,6 +356,156 @@ export const useVoiceChat = () => {
     });
   }, []);
 
+  // State for text-to-speech
+  const [isReading, setIsReading] = useState(false);
+  const speechSynthesisRef = useRef<SpeechSynthesis | null>(null);
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const readHistoryAloud = useCallback(() => {
+    if (!('speechSynthesis' in window)) {
+      alert('Text-to-speech is not supported in your browser.');
+      return;
+    }
+
+    if (transcript.length === 0) {
+      alert('No history to read. Please load a history file first.');
+      return;
+    }
+
+    // Stop any ongoing speech
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+    }
+
+    speechSynthesisRef.current = window.speechSynthesis;
+    
+    // Combine all messages into one text
+    const fullText = transcript
+      .map(turn => {
+        const userText = turn.user ? `User: ${turn.user}` : '';
+        const assistantText = turn.assistant ? `Assistant: ${turn.assistant}` : '';
+        return [userText, assistantText].filter(Boolean).join('\n');
+      })
+      .filter(Boolean)
+      .join('\n\n');
+
+    if (!fullText.trim()) {
+      alert('No readable content in history.');
+      return;
+    }
+
+    setIsReading(true);
+
+    const utterance = new SpeechSynthesisUtterance(fullText);
+    currentUtteranceRef.current = utterance;
+
+    // Configure voice
+    const voices = speechSynthesisRef.current.getVoices();
+    const preferredVoices = voices.filter(v => 
+      v.lang.includes('he') || v.lang.includes('en') || v.name.includes('Google')
+    );
+    if (preferredVoices.length > 0) {
+      utterance.voice = preferredVoices[0];
+    }
+    utterance.lang = 'he-IL';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    utterance.onend = () => {
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event);
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+      alert('Error reading history. Please try again.');
+    };
+
+    speechSynthesisRef.current.speak(utterance);
+  }, [transcript]);
+
+  const stopReading = useCallback(() => {
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+    }
+  }, []);
+
+  const readTextFile = useCallback((text: string) => {
+    if (!('speechSynthesis' in window)) {
+      alert('Text-to-speech is not supported in your browser.');
+      return;
+    }
+
+    if (!text.trim()) {
+      alert('No text to read.');
+      return;
+    }
+
+    // Stop any ongoing speech
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+    }
+
+    speechSynthesisRef.current = window.speechSynthesis;
+
+    setIsReading(true);
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    currentUtteranceRef.current = utterance;
+
+    // Configure voice
+    const voices = speechSynthesisRef.current.getVoices();
+    const preferredVoices = voices.filter(v => 
+      v.lang.includes('he') || v.lang.includes('en') || v.name.includes('Google')
+    );
+    if (preferredVoices.length > 0) {
+      utterance.voice = preferredVoices[0];
+    }
+    utterance.lang = 'he-IL';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    utterance.onend = () => {
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event);
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+      alert('Error reading text. Please try again.');
+    };
+
+    speechSynthesisRef.current.speak(utterance);
+  }, []);
+
+  const loadTextFile = useCallback((file: File) => {
+    return new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = e.target?.result as string;
+          if (content && content.trim()) {
+            resolve();
+          } else {
+            reject(new Error('File is empty'));
+          }
+        } catch (err) {
+          reject(new Error('Failed to read file'));
+        }
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsText(file);
+    });
+  }, []);
+
   return { 
     status, 
     transcript, 
@@ -364,6 +514,11 @@ export const useVoiceChat = () => {
     stopConversation,
     saveHistoryToFile,
     clearHistory,
-    loadHistoryFromFile
+    loadHistoryFromFile,
+    readHistoryAloud,
+    stopReading,
+    isReading,
+    readTextFile,
+    loadTextFile
   };
 };
