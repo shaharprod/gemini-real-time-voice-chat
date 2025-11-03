@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { useVoiceChat } from './hooks/useVoiceChat';
 import { AppStatus } from './types';
-import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon, SpeakerIcon, DictationIcon, FileTextIcon, SearchIcon, NewsIcon } from './components/Icons';
+import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon, SpeakerIcon, DictationIcon, FileTextIcon, SearchIcon, NewsIcon, PauseIcon, PlayIcon, VolumeXIcon, Volume2Icon } from './components/Icons';
 import { StatusIndicator } from './components/StatusIndicator';
 import { Transcript } from './components/Transcript';
 
@@ -12,6 +12,10 @@ const App: React.FC = () => {
     transcript, 
     error,
     sources,
+    isSearchEnabled,
+    setIsSearchEnabled,
+    isAssistantMuted,
+    setIsAssistantMuted,
     startConversation,
     startDictationOnly,
     stopConversation,
@@ -20,8 +24,12 @@ const App: React.FC = () => {
     clearHistory,
     loadHistoryFromFile,
     readHistoryAloud,
+    pauseReading,
+    resumeReading,
     stopReading,
     isReading,
+    isPaused,
+    readingProgress,
     readTextFile,
     loadTextFile,
     readArticleTitles,
@@ -110,8 +118,10 @@ const App: React.FC = () => {
   };
 
   const handleReadAloud = () => {
-    if (isReading) {
-      stopReading();
+    if (isPaused) {
+      resumeReading();
+    } else if (isReading) {
+      pauseReading();
     } else {
       readHistoryAloud();
     }
@@ -171,10 +181,38 @@ const App: React.FC = () => {
           </div>
           <div className="flex items-center gap-2">
             <StatusIndicator status={status} />
-            <div className="flex items-center gap-2 px-2 py-1 bg-blue-900/30 rounded-lg border border-blue-700/50">
-              <SearchIcon className="w-4 h-4 text-blue-400" />
-              <span className="text-xs text-blue-300 font-medium">Real-time Search</span>
-            </div>
+            <button
+              onClick={() => setIsSearchEnabled(!isSearchEnabled)}
+              className={`flex items-center gap-2 px-3 py-1 rounded-lg border transition-colors ${
+                isSearchEnabled
+                  ? 'bg-blue-900/30 border-blue-700/50 hover:bg-blue-900/50'
+                  : 'bg-gray-700/30 border-gray-600/50 hover:bg-gray-700/50'
+              }`}
+              title={isSearchEnabled ? "כיבוי חיפוש בזמן אמת" : "הפעלת חיפוש בזמן אמת"}
+            >
+              <SearchIcon className={`w-4 h-4 ${isSearchEnabled ? 'text-blue-400' : 'text-gray-500'}`} />
+              <span className={`text-xs font-medium ${isSearchEnabled ? 'text-blue-300' : 'text-gray-400'}`}>
+                {isSearchEnabled ? 'חיפוש פעיל' : 'חיפוש כבוי'}
+              </span>
+            </button>
+            <button
+              onClick={() => setIsAssistantMuted(!isAssistantMuted)}
+              className={`flex items-center gap-2 px-3 py-1 rounded-lg border transition-colors ${
+                isAssistantMuted
+                  ? 'bg-red-900/30 border-red-700/50 hover:bg-red-900/50'
+                  : 'bg-gray-700/30 border-gray-600/50 hover:bg-gray-700/50'
+              }`}
+              title={isAssistantMuted ? "הפעלת קול האסיסטנט" : "השתקת האסיסטנט"}
+            >
+              {isAssistantMuted ? (
+                <VolumeXIcon className="w-4 h-4 text-red-400" />
+              ) : (
+                <Volume2Icon className="w-4 h-4 text-gray-400" />
+              )}
+              <span className={`text-xs font-medium ${isAssistantMuted ? 'text-red-300' : 'text-gray-400'}`}>
+                {isAssistantMuted ? 'מושתק' : 'קול פעיל'}
+              </span>
+            </button>
             <div className="flex gap-3 ml-4 flex-wrap">
               <button
                 onClick={handleSaveHistory}
@@ -214,19 +252,51 @@ const App: React.FC = () => {
                 <SpeakerIcon className="w-5 h-5" />
                 <span className="text-xs">{isReading ? 'עצור' : 'הקרא קובץ'}</span>
               </button>
-              <button
-                onClick={handleReadAloud}
-                disabled={transcript.length === 0}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                  isReading 
-                    ? 'text-blue-400 hover:text-blue-300 hover:bg-gray-700 bg-blue-900/30' 
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-                }`}
-                title={isReading ? "עצור הקראה" : "הקרא היסטוריה בקול"}
-              >
-                <SpeakerIcon className="w-5 h-5" />
-                <span className="text-xs">{isReading ? 'עצור' : 'הקרא היסטוריה'}</span>
-              </button>
+              {/* Reading Control Buttons */}
+              {isReading && (
+                <>
+                  {isPaused ? (
+                    <button
+                      onClick={resumeReading}
+                      className="flex items-center gap-2 px-3 py-2 text-green-400 hover:text-green-300 hover:bg-gray-700 rounded-lg transition-colors"
+                      title="המשך הקראה"
+                    >
+                      <PlayIcon className="w-5 h-5" />
+                      <span className="text-xs">המשך</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={pauseReading}
+                      className="flex items-center gap-2 px-3 py-2 text-yellow-400 hover:text-yellow-300 hover:bg-gray-700 rounded-lg transition-colors"
+                      title="השהה הקראה"
+                    >
+                      <PauseIcon className="w-5 h-5" />
+                      <span className="text-xs">השהה</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={stopReading}
+                    className="flex items-center gap-2 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-gray-700 rounded-lg transition-colors"
+                    title="עצור הקראה"
+                  >
+                    <StopIcon className="w-5 h-5" />
+                    <span className="text-xs">עצור</span>
+                  </button>
+                </>
+              )}
+              {!isReading && (
+                <button
+                  onClick={handleReadAloud}
+                  disabled={transcript.length === 0}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
+                  }`}
+                  title="הקרא היסטוריה בקול"
+                >
+                  <SpeakerIcon className="w-5 h-5" />
+                  <span className="text-xs">הקרא היסטוריה</span>
+                </button>
+              )}
               <button
                 onClick={handleReadArticleTitles}
                 disabled={sources.length === 0 || isReading}
@@ -268,14 +338,37 @@ const App: React.FC = () => {
         />
 
         <main className="flex-1 overflow-y-auto p-6">
+          {/* Reading Progress */}
+          {isReading && readingProgress && (
+            <div className="mb-4 p-3 bg-blue-900/20 border border-blue-700/50 rounded-lg">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-blue-300 font-medium">
+                  {isPaused ? 'הקראה מושהה' : 'קורא...'}
+                </span>
+                <span className="text-xs text-blue-300/70">
+                  {Math.round((readingProgress.current / readingProgress.total) * 100)}%
+                </span>
+              </div>
+              <div className="w-full bg-gray-700 rounded-full h-2">
+                <div
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${(readingProgress.current / readingProgress.total) * 100}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
+          
           <Transcript transcript={transcript} />
           
-          {sources.length > 0 && (
+          {sources.length > 0 ? (
             <div className="mt-6 p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg">
               <div className="flex items-center gap-2 mb-3">
                 <NewsIcon className="w-5 h-5 text-blue-400" />
                 <h3 className="font-semibold text-blue-300">מקורות מאמרים ({sources.length})</h3>
               </div>
+              <p className="text-xs text-blue-300/70 mb-3">
+                לחץ על "הקרא" ליד כל כתבה כדי להקשיב לתוכן המלא
+              </p>
               <div className="space-y-2 max-h-48 overflow-y-auto">
                 {sources.slice(0, 10).map((url, index) => (
                   <div key={index} className="flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg hover:bg-gray-700/70 transition-colors">
@@ -293,6 +386,18 @@ const App: React.FC = () => {
                 ))}
               </div>
             </div>
+          ) : (
+            transcript.length > 0 && transcript.some(t => t.assistant.toLowerCase().includes('מקור') || t.assistant.toLowerCase().includes('source') || t.assistant.toLowerCase().includes('wall') || t.assistant.toLowerCase().includes('ynet')) && (
+              <div className="mt-6 p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                  <NewsIcon className="w-5 h-5 text-yellow-400" />
+                  <h3 className="font-semibold text-yellow-300">אין כתובות מאמרים זמינות</h3>
+                </div>
+                <p className="text-xs text-yellow-300/70">
+                  המערכת לא מצאה כתובות ספציפיות של מאמרים בתשובה. נסה לשאול שוב: "תן לי את הכתובות הספציפיות של המאמרים" או "מה הכתובות המלאות של הכתבות?"
+                </p>
+              </div>
+            )
           )}
           
           {permissionError && (

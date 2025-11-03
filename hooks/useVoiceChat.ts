@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from "@google/genai";
 import { AppStatus, ConversationTurn } from '../types';
 
@@ -65,6 +65,9 @@ export const useVoiceChat = () => {
   });
   const [error, setError] = useState<string | null>(null);
   const [sources, setSources] = useState<string[]>([]); // URLs from search results
+  const [isSearchEnabled, setIsSearchEnabled] = useState(true); // Control for real-time search
+  const [isPaused, setIsPaused] = useState(false); // Control for pausing reading
+  const [isAssistantMuted, setIsAssistantMuted] = useState(false); // Control for muting assistant
 
   const sessionPromiseRef = useRef<Promise<Session> | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -80,6 +83,36 @@ export const useVoiceChat = () => {
   
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+
+  // Real-time mute control: stop/start audio immediately when mute state changes
+  useEffect(() => {
+    if (isAssistantMuted) {
+      // Immediately stop all currently playing audio when muted
+      if (audioSourcesRef.current.size > 0) {
+        audioSourcesRef.current.forEach(source => {
+          try {
+            source.stop();
+          } catch (err) {
+            // Source might already be stopped
+            console.log('Audio source already stopped');
+          }
+        });
+        audioSourcesRef.current.clear();
+        nextStartTimeRef.current = 0;
+      }
+    } else {
+      // When unmuted, ensure AudioContext is ready to play next audio chunk
+      if (outputAudioContextRef.current) {
+        const ctx = outputAudioContextRef.current;
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(err => {
+            console.error('Failed to resume AudioContext:', err);
+          });
+        }
+      }
+    }
+    // Next audio chunk will play automatically when unmuted
+  }, [isAssistantMuted]);
 
   const startDictationOnly = useCallback(() => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
@@ -193,8 +226,126 @@ export const useVoiceChat = () => {
     }
   }, [status]);
 
+  const updateTranscript = (userText: string, assistantText: string, isFinal: boolean) => {
+    setTranscript(prev => {
+        const newTranscript = [...prev];
+        if (currentTurnIdRef.current) {
+            const turnIndex = newTranscript.findIndex(t => t.id === currentTurnIdRef.current);
+            if (turnIndex !== -1) {
+                newTranscript[turnIndex] = { ...newTranscript[turnIndex], user: userText, assistant: assistantText, isFinal };
+                // Save to localStorage
+                try {
+                  localStorage.setItem(STORAGE_KEY, JSON.stringify(newTranscript));
+                } catch (err) {
+                  console.error('Failed to save history:', err);
+                }
+                return newTranscript;
+            }
+        }
+        
+        const newTurnId = Date.now().toString();
+        currentTurnIdRef.current = newTurnId;
+        const updated = [...newTranscript, { id: newTurnId, user: userText, assistant: assistantText, isFinal }];
+        // Save to localStorage
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        } catch (err) {
+          console.error('Failed to save history:', err);
+        }
+        return updated;
+    });
+  };
+
+  const handleServerMessage = useCallback(async (message: LiveServerMessage) => {
+    if (message.serverContent?.inputTranscription) {
+      const text = message.serverContent.inputTranscription.text;
+      currentInputTranscriptionRef.current += text;
+      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
+    }
+
+    if (message.serverContent?.outputTranscription) {
+      setStatus(AppStatus.SPEAKING);
+      const text = message.serverContent.outputTranscription.text;
+      currentOutputTranscriptionRef.current += text;
+      
+      // Extract URLs from the text (look for URLs in format: http://..., https://..., or "Source: [URL]" or "מקור: [URL]")
+      // Filter out homepage URLs (like www.walla.co.il, www.ynet.co.il without paths)
+      const urlPattern = /(?:Source:\s*|From:\s*|מקור:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+      const foundUrls = text.match(urlPattern) || [];
+      const cleanUrls = foundUrls
+        .map(url => url.replace(/^(Source:\s*|From:\s*|מקור:\s*)/i, '').trim())
+        .filter(url => {
+          // Filter out homepage URLs - keep only URLs with paths (like /news/, /item/, /article/)
+          const urlObj = new URL(url);
+          const path = urlObj.pathname;
+          // Keep URLs that have paths longer than just "/" or "/index.html"
+          return path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php';
+        });
+      if (cleanUrls.length > 0) {
+        setSources(prev => {
+          const combined = [...prev, ...cleanUrls];
+          return Array.from(new Set(combined)); // Remove duplicates
+        });
+      }
+      
+      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
+    }
+    
+    if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
+        setStatus(AppStatus.SPEAKING);
+        // Always decode and prepare audio, but only play if not muted
+        const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
+        const outputAudioContext = outputAudioContextRef.current;
+        if (outputAudioContext) {
+          // Check if assistant is muted right before playing
+          if (!isAssistantMuted) {
+            // Resume AudioContext if suspended (browser autoplay policy)
+            if (outputAudioContext.state === 'suspended') {
+              await outputAudioContext.resume();
+            }
+            
+            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioContext.currentTime);
+            const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioContext, 24000, 1);
+            const source = outputAudioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(outputAudioContext.destination);
+            
+            source.addEventListener('ended', () => {
+              audioSourcesRef.current.delete(source);
+            });
+            
+            source.start(nextStartTimeRef.current);
+            nextStartTimeRef.current += audioBuffer.duration;
+            audioSourcesRef.current.add(source);
+          }
+          // If muted, skip playing but still update timing to keep sync
+          else {
+            // Still decode to maintain timing, but don't play
+            const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioContext, 24000, 1);
+            nextStartTimeRef.current += audioBuffer.duration;
+          }
+        }
+    }
+
+    if (message.serverContent?.interrupted) {
+        audioSourcesRef.current.forEach(source => source.stop());
+        audioSourcesRef.current.clear();
+        nextStartTimeRef.current = 0;
+    }
+    
+    if (message.serverContent?.turnComplete) {
+      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, true);
+      currentTurnIdRef.current = null;
+      currentInputTranscriptionRef.current = '';
+      currentOutputTranscriptionRef.current = '';
+      setStatus(AppStatus.LISTENING);
+    }
+  }, [isAssistantMuted]);
+
   const startConversation = useCallback(() => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
+    
+    // Note: isSearchEnabled state is used in the config below
 
     // Stop dictation mode if active
     if (isDictationModeRef.current && recognitionRef.current) {
@@ -227,10 +378,10 @@ export const useVoiceChat = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: 'You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled through Google Search Grounding. ALWAYS use internet search when users ask about: current events, recent news, weather, stock prices, sports results, current time/date in specific locations, breaking news, latest updates on any topic, recent developments, current status of anything, or ANY information that might require up-to-date data. Search the internet automatically and provide the most current information with sources when available. IMPORTANT: When providing information from web searches, ALWAYS include the full URLs/sources in your response. Format: "מקור: [URL]" or "Source: [URL]" or just include the full URL (https://...) in your text. This allows users to use the article reading features - there is a button to read article titles and individual buttons to read full articles. If users ask to read article titles or full article content, inform them that they can use the article reading buttons in the interface. Mention when you searched for information. Keep responses concise and informative.',
-          // Enable Google Search grounding for real-time internet search
+          systemInstruction: 'You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled through Google Search Grounding. CRITICAL INSTRUCTIONS FOR REAL-TIME SEARCH: 1. ALWAYS search the internet when users ask about ANY current event, news, weather, stock prices, sports results, time/date, breaking news, or ANY topic that might require up-to-date information. 2. NEVER provide information from memory or training data when the user asks about current events - ALWAYS search first. 3. Prioritize RECENT and CURRENT information only - filter out old articles. When searching for news, prioritize articles from the last 24 hours, and NEVER provide articles older than 7 days unless the user specifically asks for historical information. 4. When presenting search results, explicitly mention the DATE and TIME of the information to show it is current. 5. If you find old information (more than 7 days old), explicitly state: "המידע הזה ישן, אני אחפש מידע עדכני יותר" and search again. 6. CRITICAL: When providing information from web searches about news articles, you MUST include the SPECIFIC ARTICLE URLs (not just the homepage like www.walla.co.il or www.ynet.co.il). For example, if you find a news article, provide the full URL like "https://news.walla.co.il/item/1234567" or "https://www.ynet.co.il/news/article/abc123". Always include at least 2-3 specific article URLs with recent publication dates. Format: "מקור: [FULL ARTICLE URL]" or include the full URL (https://...) in your text. The URLs MUST be specific article links, not homepages. 7. Always verify the publication date of articles before sharing them - prefer the most recent sources. 8. When users ask to read article titles or articles, provide ONLY recent URLs (from the last 24-48 hours) so they can use the reading buttons in the interface. 9. Explicitly mention when you searched and emphasize that the information is CURRENT and REAL-TIME. Keep responses concise and informative, but always emphasize recency and accuracy of information.',
+          // Enable Google Search grounding for real-time internet search (if enabled)
           groundingWithGoogleSearch: {
-            enabled: true,
+            enabled: isSearchEnabled,
           },
         },
         callbacks: {
@@ -308,7 +459,7 @@ export const useVoiceChat = () => {
         setError(err.message || 'Failed to initialize Gemini API.');
         setStatus(AppStatus.ERROR);
     }
-  }, [status]);
+  }, [status, isSearchEnabled, handleServerMessage]);
 
   const stopConversation = useCallback(() => {
     // Stop dictation mode if active
@@ -363,98 +514,6 @@ export const useVoiceChat = () => {
     currentInputTranscriptionRef.current = '';
     currentOutputTranscriptionRef.current = '';
   }, []);
-
-  const handleServerMessage = async (message: LiveServerMessage) => {
-    if (message.serverContent?.inputTranscription) {
-      const text = message.serverContent.inputTranscription.text;
-      currentInputTranscriptionRef.current += text;
-      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
-    }
-
-    if (message.serverContent?.outputTranscription) {
-      setStatus(AppStatus.SPEAKING);
-      const text = message.serverContent.outputTranscription.text;
-      currentOutputTranscriptionRef.current += text;
-      
-      // Extract URLs from the text (look for URLs in format: http://..., https://..., or "Source: [URL]" or "מקור: [URL]")
-      const urlPattern = /(?:Source:\s*|From:\s*|מקור:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
-      const foundUrls = text.match(urlPattern) || [];
-      const cleanUrls = foundUrls.map(url => url.replace(/^(Source:\s*|From:\s*|מקור:\s*)/i, '').trim());
-      if (cleanUrls.length > 0) {
-        setSources(prev => {
-          const combined = [...prev, ...cleanUrls];
-          return Array.from(new Set(combined)); // Remove duplicates
-        });
-      }
-      
-      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
-    }
-    
-    if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
-        setStatus(AppStatus.SPEAKING);
-        const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
-        const outputAudioContext = outputAudioContextRef.current;
-        if (outputAudioContext) {
-          nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioContext.currentTime);
-          const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioContext, 24000, 1);
-          const source = outputAudioContext.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(outputAudioContext.destination);
-          
-          source.addEventListener('ended', () => {
-            audioSourcesRef.current.delete(source);
-          });
-          
-          source.start(nextStartTimeRef.current);
-          nextStartTimeRef.current += audioBuffer.duration;
-          audioSourcesRef.current.add(source);
-        }
-    }
-
-    if (message.serverContent?.interrupted) {
-        audioSourcesRef.current.forEach(source => source.stop());
-        audioSourcesRef.current.clear();
-        nextStartTimeRef.current = 0;
-    }
-    
-    if (message.serverContent?.turnComplete) {
-      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, true);
-      currentTurnIdRef.current = null;
-      currentInputTranscriptionRef.current = '';
-      currentOutputTranscriptionRef.current = '';
-      setStatus(AppStatus.LISTENING);
-    }
-  };
-  
-  const updateTranscript = (userText: string, assistantText: string, isFinal: boolean) => {
-    setTranscript(prev => {
-        const newTranscript = [...prev];
-        if (currentTurnIdRef.current) {
-            const turnIndex = newTranscript.findIndex(t => t.id === currentTurnIdRef.current);
-            if (turnIndex !== -1) {
-                newTranscript[turnIndex] = { ...newTranscript[turnIndex], user: userText, assistant: assistantText, isFinal };
-                // Save to localStorage
-                try {
-                  localStorage.setItem(STORAGE_KEY, JSON.stringify(newTranscript));
-                } catch (err) {
-                  console.error('Failed to save history:', err);
-                }
-                return newTranscript;
-            }
-        }
-        
-        const newTurnId = Date.now().toString();
-        currentTurnIdRef.current = newTurnId;
-        const updated = [...newTranscript, { id: newTurnId, user: userText, assistant: assistantText, isFinal }];
-        // Save to localStorage
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-        } catch (err) {
-          console.error('Failed to save history:', err);
-        }
-        return updated;
-    });
-  };
 
   const saveHistoryToFile = useCallback(() => {
     try {
@@ -542,8 +601,25 @@ export const useVoiceChat = () => {
 
   // State for text-to-speech
   const [isReading, setIsReading] = useState(false);
+  const [readingProgress, setReadingProgress] = useState<{ current: number; total: number } | null>(null);
   const speechSynthesisRef = useRef<SpeechSynthesis | null>(null);
   const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const pausedPositionRef = useRef<number>(0); // Store position when paused
+  const readingTextRef = useRef<string>(''); // Store text being read
+
+  const pauseReading = useCallback(() => {
+    if (speechSynthesisRef.current && speechSynthesisRef.current.speaking) {
+      speechSynthesisRef.current.pause();
+      setIsPaused(true);
+    }
+  }, []);
+
+  const resumeReading = useCallback(() => {
+    if (speechSynthesisRef.current && speechSynthesisRef.current.paused) {
+      speechSynthesisRef.current.resume();
+      setIsPaused(false);
+    }
+  }, []);
 
   const readHistoryAloud = useCallback(() => {
     if (!('speechSynthesis' in window)) {
@@ -552,7 +628,13 @@ export const useVoiceChat = () => {
     }
 
     if (transcript.length === 0) {
-      alert('No history to read. Please load a history file first.');
+      alert('אין היסטוריה להקראה. נסה לטעון קובץ היסטוריה קודם.');
+      return;
+    }
+
+    // Resume if paused
+    if (isPaused && speechSynthesisRef.current) {
+      resumeReading();
       return;
     }
 
@@ -566,19 +648,22 @@ export const useVoiceChat = () => {
     // Combine all messages into one text
     const fullText = transcript
       .map(turn => {
-        const userText = turn.user ? `User: ${turn.user}` : '';
-        const assistantText = turn.assistant ? `Assistant: ${turn.assistant}` : '';
+        const userText = turn.user ? `משתמש: ${turn.user}` : '';
+        const assistantText = turn.assistant ? `עוזר: ${turn.assistant}` : '';
         return [userText, assistantText].filter(Boolean).join('\n');
       })
       .filter(Boolean)
       .join('\n\n');
 
     if (!fullText.trim()) {
-      alert('No readable content in history.');
+      alert('אין תוכן קריא בהיסטוריה.');
       return;
     }
 
+    readingTextRef.current = fullText;
     setIsReading(true);
+    setIsPaused(false);
+    setReadingProgress({ current: 0, total: fullText.length });
 
     const utterance = new SpeechSynthesisUtterance(fullText);
     currentUtteranceRef.current = utterance;
@@ -596,26 +681,42 @@ export const useVoiceChat = () => {
     utterance.pitch = 1;
     utterance.volume = 1;
 
+    // Track progress
+    utterance.onboundary = (event) => {
+      if (event.charIndex !== undefined) {
+        setReadingProgress({ current: event.charIndex, total: fullText.length });
+      }
+    };
+
     utterance.onend = () => {
       setIsReading(false);
+      setIsPaused(false);
+      setReadingProgress(null);
       currentUtteranceRef.current = null;
+      readingTextRef.current = '';
     };
 
     utterance.onerror = (event) => {
       console.error('Speech synthesis error:', event);
       setIsReading(false);
+      setIsPaused(false);
+      setReadingProgress(null);
       currentUtteranceRef.current = null;
-      alert('Error reading history. Please try again.');
+      alert('שגיאה בהקראה. נסה שוב.');
     };
 
     speechSynthesisRef.current.speak(utterance);
-  }, [transcript]);
+  }, [transcript, isPaused, resumeReading]);
 
   const stopReading = useCallback(() => {
     if (speechSynthesisRef.current) {
       speechSynthesisRef.current.cancel();
       setIsReading(false);
+      setIsPaused(false);
+      setReadingProgress(null);
       currentUtteranceRef.current = null;
+      pausedPositionRef.current = 0;
+      readingTextRef.current = '';
     }
   }, []);
 
@@ -812,7 +913,13 @@ export const useVoiceChat = () => {
   // Function to read article titles aloud
   const readArticleTitles = useCallback(async () => {
     if (sources.length === 0) {
-      alert('No article sources found. Ask about current news first.');
+      alert('אין מקורות מאמרים. שאל על חדשות עדכניות קודם.');
+      return;
+    }
+
+    // Resume if paused
+    if (isPaused && speechSynthesisRef.current) {
+      resumeReading();
       return;
     }
 
@@ -827,8 +934,9 @@ export const useVoiceChat = () => {
 
     speechSynthesisRef.current = window.speechSynthesis;
     setIsReading(true);
+    setIsPaused(false);
 
-    let titlesText = 'Article titles:\n\n';
+    let titlesText = 'כותרות מאמרים:\n\n';
     
     for (const url of sources.slice(0, 10)) { // Limit to 10 articles
       const title = await fetchArticleTitle(url);
@@ -837,11 +945,14 @@ export const useVoiceChat = () => {
       }
     }
 
-    if (titlesText === 'Article titles:\n\n') {
-      alert('Could not fetch article titles. Please try again.');
+    if (titlesText === 'כותרות מאמרים:\n\n') {
+      alert('לא הצלחתי להביא כותרות. נסה שוב.');
       setIsReading(false);
       return;
     }
+
+    readingTextRef.current = titlesText;
+    setReadingProgress({ current: 0, total: titlesText.length });
 
     const utterance = new SpeechSynthesisUtterance(titlesText);
     currentUtteranceRef.current = utterance;
@@ -858,19 +969,31 @@ export const useVoiceChat = () => {
     utterance.pitch = 1;
     utterance.volume = 1;
 
+    // Track progress
+    utterance.onboundary = (event) => {
+      if (event.charIndex !== undefined) {
+        setReadingProgress({ current: event.charIndex, total: titlesText.length });
+      }
+    };
+
     utterance.onend = () => {
       setIsReading(false);
+      setIsPaused(false);
+      setReadingProgress(null);
       currentUtteranceRef.current = null;
+      readingTextRef.current = '';
     };
 
     utterance.onerror = (event) => {
       console.error('Speech synthesis error:', event);
       setIsReading(false);
+      setIsPaused(false);
+      setReadingProgress(null);
       currentUtteranceRef.current = null;
     };
 
     speechSynthesisRef.current.speak(utterance);
-  }, [sources, fetchArticleTitle]);
+  }, [sources, fetchArticleTitle, isPaused, resumeReading]);
 
   // Function to read full article from URL
   const readFullArticle = useCallback(async (url: string) => {
@@ -905,18 +1028,27 @@ export const useVoiceChat = () => {
 
       console.log(`Article content fetched: ${content.length} characters`);
 
+      readingTextRef.current = content;
+      setIsPaused(false);
+      setReadingProgress({ current: 0, total: content.length });
+
       // Split long content into chunks to avoid issues
       const chunks = content.match(/.{1,10000}/g) || [content];
       let currentChunkIndex = 0;
+      let totalCharsRead = 0;
 
       const readNextChunk = () => {
         if (currentChunkIndex >= chunks.length) {
           setIsReading(false);
+          setIsPaused(false);
+          setReadingProgress(null);
           currentUtteranceRef.current = null;
+          readingTextRef.current = '';
           return;
         }
 
-        const utterance = new SpeechSynthesisUtterance(chunks[currentChunkIndex]);
+        const chunk = chunks[currentChunkIndex];
+        const utterance = new SpeechSynthesisUtterance(chunk);
         currentUtteranceRef.current = utterance;
 
         const voices = speechSynthesisRef.current?.getVoices() || [];
@@ -931,7 +1063,16 @@ export const useVoiceChat = () => {
         utterance.pitch = 1;
         utterance.volume = 1;
 
+        // Track progress
+        utterance.onboundary = (event) => {
+          if (event.charIndex !== undefined) {
+            const currentPos = totalCharsRead + event.charIndex;
+            setReadingProgress({ current: currentPos, total: content.length });
+          }
+        };
+
         utterance.onend = () => {
+          totalCharsRead += chunk.length;
           currentChunkIndex++;
           readNextChunk();
         };
@@ -939,6 +1080,8 @@ export const useVoiceChat = () => {
         utterance.onerror = (event) => {
           console.error('Speech synthesis error:', event);
           setIsReading(false);
+          setIsPaused(false);
+          setReadingProgress(null);
           currentUtteranceRef.current = null;
         };
 
@@ -960,6 +1103,10 @@ export const useVoiceChat = () => {
     transcript, 
     error,
     sources,
+    isSearchEnabled,
+    setIsSearchEnabled,
+    isAssistantMuted,
+    setIsAssistantMuted,
     startConversation,
     startDictationOnly,
     stopConversation,
@@ -968,8 +1115,12 @@ export const useVoiceChat = () => {
     clearHistory,
     loadHistoryFromFile,
     readHistoryAloud,
+    pauseReading,
+    resumeReading,
     stopReading,
     isReading,
+    isPaused,
+    readingProgress,
     readTextFile,
     loadTextFile,
     readArticleTitles,
