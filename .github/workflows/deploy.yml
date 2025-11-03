@@ -60,6 +60,21 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
+      - name: Verify build output
+        run: |
+          echo "📦 Checking build output..."
+          ls -la dist/
+          echo ""
+          echo "📄 Checking index.html..."
+          if [ -f "dist/index.html" ]; then
+            cat dist/index.html
+          else
+            echo "❌ index.html not found!"
+            exit 1
+          fi
+          echo ""
+          echo "✅ Build output verified"
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
