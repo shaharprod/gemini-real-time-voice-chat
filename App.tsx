@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { useVoiceChat } from './hooks/useVoiceChat';
 import { AppStatus } from './types';
-import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon, SpeakerIcon, DictationIcon, FileTextIcon } from './components/Icons';
+import { MicrophoneIcon, StopIcon, DownloadIcon, UploadIcon, TrashIcon, SpeakerIcon, DictationIcon, FileTextIcon, SearchIcon, NewsIcon } from './components/Icons';
 import { StatusIndicator } from './components/StatusIndicator';
 import { Transcript } from './components/Transcript';
 
@@ -10,7 +10,8 @@ const App: React.FC = () => {
   const { 
     status, 
     transcript, 
-    error, 
+    error,
+    sources,
     startConversation,
     startDictationOnly,
     stopConversation,
@@ -22,7 +23,9 @@ const App: React.FC = () => {
     stopReading,
     isReading,
     readTextFile,
-    loadTextFile
+    loadTextFile,
+    readArticleTitles,
+    readFullArticle
   } = useVoiceChat();
   const [hasPermission, setHasPermission] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -146,67 +149,105 @@ const App: React.FC = () => {
     }
   };
 
+  const handleReadArticleTitles = async () => {
+    if (sources.length === 0) {
+      alert('אין מקורות מאמרים. שאל על חדשות עדכניות קודם.');
+      return;
+    }
+    await readArticleTitles();
+  };
+
+  const handleReadFullArticle = async (url: string) => {
+    await readFullArticle(url);
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-2xl h-[90vh] flex flex-col bg-gray-800 rounded-2xl shadow-2xl overflow-hidden">
         <header className="flex-shrink-0 p-4 border-b border-gray-700 flex justify-between items-center">
-          <h1 className="text-xl font-bold text-gray-200">Gemini Voice Assistant</h1>
+          <div className="flex flex-col">
+            <h1 className="text-xl font-bold text-gray-200">Gemini Voice Assistant</h1>
+            <p className="text-xs text-gray-400 mt-1">עוזר קולי עם חיפוש בזמן אמת</p>
+          </div>
           <div className="flex items-center gap-2">
             <StatusIndicator status={status} />
-            <div className="flex gap-2 ml-4">
+            <div className="flex items-center gap-2 px-2 py-1 bg-blue-900/30 rounded-lg border border-blue-700/50">
+              <SearchIcon className="w-4 h-4 text-blue-400" />
+              <span className="text-xs text-blue-300 font-medium">Real-time Search</span>
+            </div>
+            <div className="flex gap-3 ml-4 flex-wrap">
               <button
                 onClick={handleSaveHistory}
                 disabled={transcript.length === 0}
-                className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Save history to JSON file"
+                className="flex items-center gap-2 px-3 py-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="שמור היסטוריה לקובץ JSON"
               >
                 <DownloadIcon className="w-5 h-5" />
+                <span className="text-xs">שמור JSON</span>
               </button>
               <button
                 onClick={handleSaveHistoryToTxt}
                 disabled={transcript.length === 0}
-                className="p-2 text-gray-400 hover:text-blue-300 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Export conversation to TXT file"
+                className="flex items-center gap-2 px-3 py-2 text-gray-400 hover:text-blue-300 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="ייצא שיחה לקובץ TXT"
               >
                 <FileTextIcon className="w-5 h-5" />
+                <span className="text-xs">ייצא TXT</span>
               </button>
               <button
                 onClick={handleLoadHistory}
-                className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors"
-                title="Load history from file (JSON)"
+                className="flex items-center gap-2 px-3 py-2 text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded-lg transition-colors"
+                title="טען היסטוריה מקובץ JSON"
               >
                 <UploadIcon className="w-5 h-5" />
+                <span className="text-xs">טען JSON</span>
               </button>
               <button
                 onClick={handleLoadTextFile}
-                className={`p-2 rounded-lg transition-colors ${
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors ${
                   isReading 
                     ? 'text-purple-400 hover:text-purple-300 hover:bg-gray-700 bg-purple-900/30' 
                     : 'text-gray-400 hover:text-purple-300 hover:bg-gray-700'
                 }`}
-                title={isReading ? "Stop reading" : "Load and read text file (TXT)"}
+                title={isReading ? "עצור הקראה" : "טען והקרא קובץ טקסט"}
               >
                 <SpeakerIcon className="w-5 h-5" />
+                <span className="text-xs">{isReading ? 'עצור' : 'הקרא קובץ'}</span>
               </button>
               <button
                 onClick={handleReadAloud}
                 disabled={transcript.length === 0}
-                className={`p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                   isReading 
                     ? 'text-blue-400 hover:text-blue-300 hover:bg-gray-700 bg-blue-900/30' 
                     : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
                 }`}
-                title={isReading ? "Stop reading" : "Read history aloud"}
+                title={isReading ? "עצור הקראה" : "הקרא היסטוריה בקול"}
               >
                 <SpeakerIcon className="w-5 h-5" />
+                <span className="text-xs">{isReading ? 'עצור' : 'הקרא היסטוריה'}</span>
+              </button>
+              <button
+                onClick={handleReadArticleTitles}
+                disabled={sources.length === 0 || isReading}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  isReading
+                    ? 'text-orange-400 hover:text-orange-300 hover:bg-gray-700 bg-orange-900/30'
+                    : 'text-gray-400 hover:text-orange-300 hover:bg-gray-700'
+                }`}
+                title={sources.length === 0 ? "לא נמצאו מקורות מאמרים" : "הקרא כותרות מאמרים"}
+              >
+                <NewsIcon className="w-5 h-5" />
+                <span className="text-xs">{sources.length === 0 ? 'אין מאמרים' : 'הקרא כותרות'}</span>
               </button>
               <button
                 onClick={handleClearHistory}
                 disabled={transcript.length === 0}
-                className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Clear history"
+                className="flex items-center gap-2 px-3 py-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="נקה היסטוריה"
               >
                 <TrashIcon className="w-5 h-5" />
+                <span className="text-xs">נקה</span>
               </button>
             </div>
           </div>
@@ -228,6 +269,32 @@ const App: React.FC = () => {
 
         <main className="flex-1 overflow-y-auto p-6">
           <Transcript transcript={transcript} />
+          
+          {sources.length > 0 && (
+            <div className="mt-6 p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg">
+              <div className="flex items-center gap-2 mb-3">
+                <NewsIcon className="w-5 h-5 text-blue-400" />
+                <h3 className="font-semibold text-blue-300">מקורות מאמרים ({sources.length})</h3>
+              </div>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {sources.slice(0, 10).map((url, index) => (
+                  <div key={index} className="flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg hover:bg-gray-700/70 transition-colors">
+                    <span className="text-xs text-gray-400 flex-1 truncate" title={url}>{url}</span>
+                    <button
+                      onClick={() => handleReadFullArticle(url)}
+                      disabled={isReading}
+                      className="flex items-center gap-2 px-3 py-2 text-xs bg-orange-600 hover:bg-orange-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="הקרא כתבה מלאה"
+                    >
+                      <SpeakerIcon className="w-4 h-4" />
+                      <span>{isReading ? 'קורא...' : 'הקרא'}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
           {permissionError && (
              <div className="mt-4 p-4 bg-red-900/50 text-red-300 border border-red-700 rounded-lg">
                 <p className="font-semibold">Permission Error</p>
@@ -243,46 +310,58 @@ const App: React.FC = () => {
         </main>
         
         <footer className="flex-shrink-0 p-6 bg-gray-800/50 backdrop-blur-sm border-t border-gray-700">
-          <div className="flex justify-center items-center gap-4">
-            {/* Dictation Only Button */}
-            <button
-              onClick={isDictationActive ? stopConversation : handleStartDictation}
-              disabled={status === AppStatus.CONNECTING || isConversationActive}
-              className={`relative flex items-center justify-center w-16 h-16 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-opacity-50
-                ${isDictationActive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-400' : 'bg-purple-600 hover:bg-purple-700 focus:ring-purple-400'}
-                ${status === AppStatus.CONNECTING || isConversationActive ? 'opacity-50 cursor-not-allowed' : ''}
-              `}
-              title={isDictationActive ? "Stop dictation" : "Start dictation (no AI response)"}
-            >
-              {isDictationActive ? (
-                <StopIcon className="w-6 h-6 text-white" />
-              ) : (
-                <DictationIcon className="w-6 h-6 text-white" />
-              )}
-              {status === AppStatus.TRANSCRIBING && (
-                <span className="absolute h-full w-full rounded-full bg-purple-500/50 animate-ping"></span>
-              )}
-            </button>
-            
-            {/* Conversation Button */}
-            <button
-              onClick={isConversationActive ? stopConversation : handleStart}
-              disabled={status === AppStatus.CONNECTING || isDictationActive}
-              className={`relative flex items-center justify-center w-20 h-20 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-opacity-50
-                ${isConversationActive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-400' : 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-400'}
-                ${status === AppStatus.CONNECTING || isDictationActive ? 'opacity-50 cursor-not-allowed' : ''}
-              `}
-              title={isConversationActive ? "Stop conversation" : "Start conversation with AI"}
-            >
-              {isConversationActive ? (
-                <StopIcon className="w-8 h-8 text-white" />
-              ) : (
-                <MicrophoneIcon className="w-8 h-8 text-white" />
-              )}
-              {status === AppStatus.LISTENING && (
-                <span className="absolute h-full w-full rounded-full bg-blue-500/50 animate-ping"></span>
-              )}
-            </button>
+          <div className="flex flex-col items-center gap-4">
+            <div className="flex justify-center items-center gap-6">
+              {/* Dictation Only Button */}
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={isDictationActive ? stopConversation : handleStartDictation}
+                  disabled={status === AppStatus.CONNECTING || isConversationActive}
+                  className={`relative flex items-center justify-center w-16 h-16 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-opacity-50
+                    ${isDictationActive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-400' : 'bg-purple-600 hover:bg-purple-700 focus:ring-purple-400'}
+                    ${status === AppStatus.CONNECTING || isConversationActive ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
+                  title={isDictationActive ? "עצור הכתבה" : "התחל הכתבה (ללא תשובה מ-AI)"}
+                >
+                  {isDictationActive ? (
+                    <StopIcon className="w-6 h-6 text-white" />
+                  ) : (
+                    <DictationIcon className="w-6 h-6 text-white" />
+                  )}
+                  {status === AppStatus.TRANSCRIBING && (
+                    <span className="absolute h-full w-full rounded-full bg-purple-500/50 animate-ping"></span>
+                  )}
+                </button>
+                <span className="text-xs text-gray-400 font-medium">
+                  {isDictationActive ? 'עצור הכתבה' : 'הכתבה בלבד'}
+                </span>
+              </div>
+              
+              {/* Conversation Button */}
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={isConversationActive ? stopConversation : handleStart}
+                  disabled={status === AppStatus.CONNECTING || isDictationActive}
+                  className={`relative flex items-center justify-center w-20 h-20 rounded-full transition-all duration-300 ease-in-out focus:outline-none focus:ring-4 focus:ring-opacity-50
+                    ${isConversationActive ? 'bg-red-600 hover:bg-red-700 focus:ring-red-400' : 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-400'}
+                    ${status === AppStatus.CONNECTING || isDictationActive ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
+                  title={isConversationActive ? "עצור שיחה" : "התחל שיחה עם AI"}
+                >
+                  {isConversationActive ? (
+                    <StopIcon className="w-8 h-8 text-white" />
+                  ) : (
+                    <MicrophoneIcon className="w-8 h-8 text-white" />
+                  )}
+                  {status === AppStatus.LISTENING && (
+                    <span className="absolute h-full w-full rounded-full bg-blue-500/50 animate-ping"></span>
+                  )}
+                </button>
+                <span className="text-xs text-gray-400 font-medium">
+                  {isConversationActive ? 'עצור שיחה' : 'שיחה עם AI'}
+                </span>
+              </div>
+            </div>
           </div>
         </footer>
       </div>

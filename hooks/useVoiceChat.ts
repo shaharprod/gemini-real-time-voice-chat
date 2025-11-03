@@ -64,6 +64,7 @@ export const useVoiceChat = () => {
     return [];
   });
   const [error, setError] = useState<string | null>(null);
+  const [sources, setSources] = useState<string[]>([]); // URLs from search results
 
   const sessionPromiseRef = useRef<Promise<Session> | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -226,7 +227,7 @@ export const useVoiceChat = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: 'You are a friendly and helpful voice assistant with access to real-time internet search through Google Search. When users ask about current events, recent news, weather, stock prices, or any information that requires up-to-date data, you MUST search the internet using your grounding capabilities and provide accurate, current information with sources when possible. Keep your responses concise.',
+          systemInstruction: 'You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled through Google Search Grounding. ALWAYS use internet search when users ask about: current events, recent news, weather, stock prices, sports results, current time/date in specific locations, breaking news, latest updates on any topic, recent developments, current status of anything, or ANY information that might require up-to-date data. Search the internet automatically and provide the most current information with sources when available. IMPORTANT: When providing information from web searches, ALWAYS include the full URLs/sources in your response. Format: "מקור: [URL]" or "Source: [URL]" or just include the full URL (https://...) in your text. This allows users to use the article reading features - there is a button to read article titles and individual buttons to read full articles. If users ask to read article titles or full article content, inform them that they can use the article reading buttons in the interface. Mention when you searched for information. Keep responses concise and informative.',
           // Enable Google Search grounding for real-time internet search
           groundingWithGoogleSearch: {
             enabled: true,
@@ -374,6 +375,18 @@ export const useVoiceChat = () => {
       setStatus(AppStatus.SPEAKING);
       const text = message.serverContent.outputTranscription.text;
       currentOutputTranscriptionRef.current += text;
+      
+      // Extract URLs from the text (look for URLs in format: http://..., https://..., or "Source: [URL]" or "מקור: [URL]")
+      const urlPattern = /(?:Source:\s*|From:\s*|מקור:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+      const foundUrls = text.match(urlPattern) || [];
+      const cleanUrls = foundUrls.map(url => url.replace(/^(Source:\s*|From:\s*|מקור:\s*)/i, '').trim());
+      if (cleanUrls.length > 0) {
+        setSources(prev => {
+          const combined = [...prev, ...cleanUrls];
+          return Array.from(new Set(combined)); // Remove duplicates
+        });
+      }
+      
       updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
     }
     
@@ -677,10 +690,276 @@ export const useVoiceChat = () => {
     });
   }, []);
 
+  // Function to fetch article title from URL
+  const fetchArticleTitle = useCallback(async (url: string): Promise<string | null> => {
+    try {
+      // Use a CORS proxy or API to fetch the page
+      // For security reasons, we'll use an API endpoint
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+      const response = await fetch(proxyUrl);
+      const data = await response.json();
+      
+      if (data.contents) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(data.contents, 'text/html');
+        const title = doc.querySelector('title')?.textContent || 
+                     doc.querySelector('h1')?.textContent ||
+                     doc.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
+                     'No title found';
+        return title.trim();
+      }
+      return null;
+    } catch (err) {
+      console.error('Failed to fetch article title:', err);
+      return null;
+    }
+  }, []);
+
+  // Function to fetch article content from URL
+  const fetchArticleContent = useCallback(async (url: string): Promise<string | null> => {
+    // Try multiple proxy services as fallback
+    const proxies = [
+      `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    ];
+
+    for (const proxyUrl of proxies) {
+      try {
+        console.log(`Trying proxy: ${proxyUrl.substring(0, 50)}...`);
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+        });
+
+        if (!response.ok) {
+          console.warn(`Proxy failed with status ${response.status}`);
+          continue;
+        }
+
+        let htmlContent: string;
+        if (proxyUrl.includes('allorigins.win')) {
+          const data = await response.json();
+          htmlContent = data.contents || '';
+        } else {
+          htmlContent = await response.text();
+        }
+
+        if (!htmlContent || htmlContent.length < 100) {
+          console.warn('Proxy returned empty or very short content');
+          continue;
+        }
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+        
+        // Remove unwanted elements
+        const unwantedSelectors = 'script, style, nav, footer, header, aside, .comments, .social-share, .advertisement, [class*="ad"], iframe, noscript';
+        doc.querySelectorAll(unwantedSelectors).forEach(el => el.remove());
+        
+        // Try multiple selectors for article content (prioritize more specific ones)
+        const articleContent = 
+          // Ynet specific
+          doc.querySelector('.art_body_content')?.textContent ||
+          doc.querySelector('[class*="articleBody"]')?.textContent ||
+          doc.querySelector('[id*="article"]')?.textContent ||
+          // Generic article selectors
+          doc.querySelector('article')?.textContent ||
+          doc.querySelector('.article-content')?.textContent ||
+          doc.querySelector('.article-body')?.textContent ||
+          doc.querySelector('.post-content')?.textContent ||
+          doc.querySelector('[class*="article"]')?.textContent ||
+          doc.querySelector('[class*="content"]')?.textContent ||
+          doc.querySelector('main')?.textContent ||
+          doc.querySelector('.main-content')?.textContent ||
+          // Fallback to body but clean it better
+          (() => {
+            const body = doc.body?.textContent || '';
+            // Try to remove navigation, ads, etc. from body text
+            return body.replace(/^\s*(?:קרא עוד|עוד בחדשות|פרסומת|תגובות|שתף|like|share).*$/gmi, '').trim();
+          })();
+
+        if (articleContent && articleContent.length > 50) {
+          // Clean up the text
+          const cleaned = articleContent
+            .replace(/\s+/g, ' ')
+            .replace(/\n\s*\n/g, '\n')
+            .replace(/[^\u0590-\u05FF\u0020-\u007F\n]/g, '') // Keep Hebrew, English, and basic punctuation
+            .trim();
+          
+          if (cleaned.length > 100) {
+            console.log(`Successfully fetched article content (${cleaned.length} chars)`);
+            return cleaned.substring(0, 10000); // Limit to 10000 characters
+          }
+        }
+        
+        console.warn('Could not find article content in HTML');
+        // If we got HTML but couldn't extract content, try next proxy
+        continue;
+      } catch (err) {
+        console.error(`Proxy error for ${proxyUrl.substring(0, 50)}:`, err);
+        continue;
+      }
+    }
+
+    // All proxies failed
+    console.error('All proxies failed to fetch article content');
+    return null;
+  }, []);
+
+  // Function to read article titles aloud
+  const readArticleTitles = useCallback(async () => {
+    if (sources.length === 0) {
+      alert('No article sources found. Ask about current news first.');
+      return;
+    }
+
+    if (!('speechSynthesis' in window)) {
+      alert('Text-to-speech is not supported in your browser.');
+      return;
+    }
+
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+    }
+
+    speechSynthesisRef.current = window.speechSynthesis;
+    setIsReading(true);
+
+    let titlesText = 'Article titles:\n\n';
+    
+    for (const url of sources.slice(0, 10)) { // Limit to 10 articles
+      const title = await fetchArticleTitle(url);
+      if (title) {
+        titlesText += `${title}\n\n`;
+      }
+    }
+
+    if (titlesText === 'Article titles:\n\n') {
+      alert('Could not fetch article titles. Please try again.');
+      setIsReading(false);
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(titlesText);
+    currentUtteranceRef.current = utterance;
+
+    const voices = speechSynthesisRef.current.getVoices();
+    const preferredVoices = voices.filter(v => 
+      v.lang.includes('he') || v.lang.includes('en') || v.name.includes('Google')
+    );
+    if (preferredVoices.length > 0) {
+      utterance.voice = preferredVoices[0];
+    }
+    utterance.lang = 'he-IL';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    utterance.onend = () => {
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event);
+      setIsReading(false);
+      currentUtteranceRef.current = null;
+    };
+
+    speechSynthesisRef.current.speak(utterance);
+  }, [sources, fetchArticleTitle]);
+
+  // Function to read full article from URL
+  const readFullArticle = useCallback(async (url: string) => {
+    if (!('speechSynthesis' in window)) {
+      alert('Text-to-speech is not supported in your browser.');
+      return;
+    }
+
+    // Check if URL is valid article URL (not just homepage)
+    if (!url || url.trim().length === 0) {
+      alert('כתובת לא תקינה. יש לוודא שה-URL הוא כתובת ספציפית של כתבה.');
+      return;
+    }
+
+    if (speechSynthesisRef.current) {
+      speechSynthesisRef.current.cancel();
+    }
+
+    speechSynthesisRef.current = window.speechSynthesis;
+    setIsReading(true);
+
+    // Show loading message
+    console.log(`Fetching article from: ${url}`);
+
+    try {
+      const content = await fetchArticleContent(url);
+      if (!content || content.length < 50) {
+        alert('לא הצלחתי להביא את תוכן הכתבה. זה יכול לקרות אם:\n1. הכתובת היא רק דף בית ולא כתבה ספציפית\n2. האתר חוסם גישה אוטומטית\n3. יש בעיה ברשת\n\nנסה לשאול שוב את השאלה כדי לקבל כתובת ספציפית של כתבה.');
+        setIsReading(false);
+        return;
+      }
+
+      console.log(`Article content fetched: ${content.length} characters`);
+
+      // Split long content into chunks to avoid issues
+      const chunks = content.match(/.{1,10000}/g) || [content];
+      let currentChunkIndex = 0;
+
+      const readNextChunk = () => {
+        if (currentChunkIndex >= chunks.length) {
+          setIsReading(false);
+          currentUtteranceRef.current = null;
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(chunks[currentChunkIndex]);
+        currentUtteranceRef.current = utterance;
+
+        const voices = speechSynthesisRef.current?.getVoices() || [];
+        const preferredVoices = voices.filter(v => 
+          v.lang.includes('he') || v.lang.includes('en') || v.name.includes('Google')
+        );
+        if (preferredVoices.length > 0) {
+          utterance.voice = preferredVoices[0];
+        }
+        utterance.lang = 'he-IL';
+        utterance.rate = 0.9;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+
+        utterance.onend = () => {
+          currentChunkIndex++;
+          readNextChunk();
+        };
+
+        utterance.onerror = (event) => {
+          console.error('Speech synthesis error:', event);
+          setIsReading(false);
+          currentUtteranceRef.current = null;
+        };
+
+        if (speechSynthesisRef.current) {
+          speechSynthesisRef.current.speak(utterance);
+        }
+      };
+
+      readNextChunk();
+    } catch (err) {
+      console.error('Failed to read article:', err);
+      alert('שגיאה בהקראת הכתבה. נסה שוב או בדוק את הקונסול (F12) לפרטים נוספים.');
+      setIsReading(false);
+    }
+  }, [fetchArticleContent]);
+
   return { 
     status, 
     transcript, 
-    error, 
+    error,
+    sources,
     startConversation,
     startDictationOnly,
     stopConversation,
@@ -692,6 +971,9 @@ export const useVoiceChat = () => {
     stopReading,
     isReading,
     readTextFile,
-    loadTextFile
+    loadTextFile,
+    readArticleTitles,
+    readFullArticle
   };
 };
+

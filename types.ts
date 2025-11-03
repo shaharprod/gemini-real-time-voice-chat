@@ -13,4 +13,11 @@ export interface ConversationTurn {
   user: string;
   assistant: string;
   isFinal: boolean;
+  sources?: string[]; // URLs from search results
+}
+
+export interface ArticleInfo {
+  url: string;
+  title: string;
+  content?: string;
 }
