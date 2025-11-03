@@ -106,10 +106,10 @@ export const useVoiceChat = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: 'You are a friendly and helpful voice assistant. You have access to real-time internet search through Google Search. When users ask about current events, recent information, or anything that requires up-to-date data, you can search the internet to provide accurate and current information. Keep your responses concise.',
+          systemInstruction: 'You are a friendly and helpful voice assistant with access to real-time internet search through Google Search. When users ask about current events, recent news, weather, stock prices, or any information that requires up-to-date data, you MUST search the internet using your grounding capabilities and provide accurate, current information with sources when possible. Keep your responses concise.',
           // Enable Google Search grounding for real-time internet search
-          groundingConfig: {
-            mode: 'GROUNDING_MODE_SEARCH',
+          groundingWithGoogleSearch: {
+            enabled: true,
           },
         },
         callbacks: {
