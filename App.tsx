@@ -198,19 +198,19 @@ const App: React.FC = () => {
             <button
               onClick={() => setIsAssistantMuted(!isAssistantMuted)}
               className={`flex items-center gap-2 px-3 py-1 rounded-lg border transition-colors ${
-                isAssistantMuted
-                  ? 'bg-red-900/30 border-red-700/50 hover:bg-red-900/50'
+                !isAssistantMuted
+                  ? 'bg-green-900/30 border-green-700/50 hover:bg-green-900/50'
                   : 'bg-gray-700/30 border-gray-600/50 hover:bg-gray-700/50'
               }`}
               title={isAssistantMuted ? "הפעלת קול האסיסטנט" : "השתקת האסיסטנט"}
             >
-              {isAssistantMuted ? (
-                <VolumeXIcon className="w-4 h-4 text-red-400" />
+              {!isAssistantMuted ? (
+                <Volume2Icon className="w-4 h-4 text-green-400" />
               ) : (
-                <Volume2Icon className="w-4 h-4 text-gray-400" />
+                <VolumeXIcon className="w-4 h-4 text-gray-500" />
               )}
-              <span className={`text-xs font-medium ${isAssistantMuted ? 'text-red-300' : 'text-gray-400'}`}>
-                {isAssistantMuted ? 'מושתק' : 'קול פעיל'}
+              <span className={`text-xs font-medium ${!isAssistantMuted ? 'text-green-300' : 'text-gray-400'}`}>
+                {!isAssistantMuted ? 'קול פעיל' : 'מושתק'}
               </span>
             </button>
             <div className="flex gap-3 ml-4 flex-wrap">
@@ -300,15 +300,17 @@ const App: React.FC = () => {
               <button
                 onClick={handleReadArticleTitles}
                 disabled={sources.length === 0 || isReading}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                   isReading
-                    ? 'text-orange-400 hover:text-orange-300 hover:bg-gray-700 bg-orange-900/30'
-                    : 'text-gray-400 hover:text-orange-300 hover:bg-gray-700'
+                    ? 'bg-orange-900/30 border-orange-700/50 text-orange-300 hover:bg-orange-900/50'
+                    : sources.length > 0
+                    ? 'bg-orange-900/20 border-orange-700/30 text-orange-400 hover:bg-orange-900/30 hover:border-orange-700/50'
+                    : 'bg-gray-700/30 border-gray-600/30 text-gray-500'
                 }`}
                 title={sources.length === 0 ? "לא נמצאו מקורות מאמרים" : "הקרא כותרות מאמרים"}
               >
                 <NewsIcon className="w-5 h-5" />
-                <span className="text-xs">{sources.length === 0 ? 'אין מאמרים' : 'הקרא כותרות'}</span>
+                <span className="text-xs font-medium">{sources.length === 0 ? 'אין מאמרים' : 'הקרא כותרות'}</span>
               </button>
               <button
                 onClick={handleClearHistory}
@@ -376,11 +378,15 @@ const App: React.FC = () => {
                     <button
                       onClick={() => handleReadFullArticle(url)}
                       disabled={isReading}
-                      className="flex items-center gap-2 px-3 py-2 text-xs bg-orange-600 hover:bg-orange-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className={`flex items-center gap-2 px-3 py-2 text-xs rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                        isReading
+                          ? 'bg-orange-900/30 border-orange-700/50 text-orange-300'
+                          : 'bg-orange-900/20 border-orange-700/30 text-orange-400 hover:bg-orange-900/30 hover:border-orange-700/50'
+                      }`}
                       title="הקרא כתבה מלאה"
                     >
                       <SpeakerIcon className="w-4 h-4" />
-                      <span>{isReading ? 'קורא...' : 'הקרא'}</span>
+                      <span className="font-medium">{isReading ? 'קורא...' : 'הקרא'}</span>
                     </button>
                   </div>
                 ))}
