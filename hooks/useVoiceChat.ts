@@ -171,7 +171,7 @@ export const useVoiceChat = () => {
       };
 
       recognition.onend = () => {
-        if (isDictationModeRef.current && status === AppStatus.TRANSCRIBING) {
+        if (isDictationModeRef.current) {
           // Restart recognition if still in dictation mode
           try {
             recognition.start();
@@ -470,15 +470,13 @@ export const useVoiceChat = () => {
       let textContent = '';
       
       transcript.forEach((turn, index) => {
+        // Only include user text, no assistant responses, no labels
         if (turn.user.trim()) {
-          textContent += `User: ${turn.user}\n`;
-        }
-        if (turn.assistant.trim()) {
-          textContent += `Assistant: ${turn.assistant}\n`;
-        }
-        // Add separator between turns (except for the last one)
-        if (index < transcript.length - 1) {
-          textContent += '\n---\n\n';
+          textContent += turn.user.trim();
+          // Add newline between turns (except for the last one)
+          if (index < transcript.length - 1) {
+            textContent += '\n\n';
+          }
         }
       });
 
