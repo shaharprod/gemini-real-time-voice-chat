@@ -15,6 +15,10 @@ export default defineConfig(({ mode }) => {
     // Also check API_KEY for backwards compatibility
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || env.GEMINI_API_KEY || env.API_KEY || '';
 
+    // Get Google Custom Search API key and CX (Search Engine ID)
+    const customSearchApiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+    const customSearchCx = process.env.GOOGLE_CUSTOM_SEARCH_CX || env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
     // Log warning if API key is missing in production
     if (process.env.NODE_ENV === 'production' && !apiKey) {
       console.warn('⚠️ WARNING: GEMINI_API_KEY is not set in production build!');
@@ -30,6 +34,8 @@ export default defineConfig(({ mode }) => {
       define: {
         'process.env.API_KEY': JSON.stringify(apiKey),
         'process.env.GEMINI_API_KEY': JSON.stringify(apiKey),
+        'process.env.GOOGLE_CUSTOM_SEARCH_API_KEY': JSON.stringify(customSearchApiKey),
+        'process.env.GOOGLE_CUSTOM_SEARCH_CX': JSON.stringify(customSearchCx),
         'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || mode)
       },
       resolve: {

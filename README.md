@@ -7,9 +7,13 @@ A real-time voice chat application powered by Google Gemini AI. Speak naturally 
 - 🎙️ **Real-time voice input** - Speak directly to the AI
 - 🔊 **Audio output** - Listen to AI responses
 - 💬 **Live transcription** - See your conversation as it happens
-- 🌐 **Internet search** - AI can search the web for current information
+- 🌐 **Internet search** - AI can search the web for current information (Google Search Grounding)
+- 🔍 **Custom Search API** - Optional Google Custom Search API integration for enhanced search
 - 💾 **History saving** - Automatically saves conversation history
 - 📥 **Export/Import** - Save and load conversation history as JSON
+- 📝 **Dictation mode** - Transcribe speech without AI responses
+- 📄 **Text file reading** - Upload and read TXT files aloud
+- 📰 **Article reading** - Read article titles and full content from search results
 - ⚡ **Fast & responsive** - Built with React and Vite
 - 🎨 **Modern UI** - Clean and intuitive interface
 
@@ -37,8 +41,13 @@ A real-time voice chat application powered by Google Gemini AI. Speak naturally 
    Create a `.env.local` file in the root directory:
    ```bash
    GEMINI_API_KEY=your_api_key_here
+   # Optional: Google Custom Search API (for enhanced search)
+   GOOGLE_CUSTOM_SEARCH_API_KEY=your_custom_search_api_key_here
+   GOOGLE_CUSTOM_SEARCH_CX=your_search_engine_id_here
    ```
-   You can get your API key from: https://makersuite.google.com/app/apikey
+   You can get your Gemini API key from: https://makersuite.google.com/app/apikey
+   
+   For Custom Search API setup, see [GOOGLE_CUSTOM_SEARCH_SETUP.md](./GOOGLE_CUSTOM_SEARCH_SETUP.md)
 
 4. **Run the development server**
    ```bash

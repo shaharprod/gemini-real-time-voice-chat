@@ -59,6 +59,8 @@ jobs:
           NODE_ENV: production
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_CUSTOM_SEARCH_API_KEY: ${{ secrets.GOOGLE_CUSTOM_SEARCH_API_KEY }}
+          GOOGLE_CUSTOM_SEARCH_CX: ${{ secrets.GOOGLE_CUSTOM_SEARCH_CX }}
 
       - name: Verify build output
         run: |

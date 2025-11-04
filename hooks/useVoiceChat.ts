@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from "@google/genai";
-import { AppStatus, ConversationTurn } from '../types';
+import { AppStatus, ConversationTurn, SourceInfo } from '../types';
 
 // --- Audio Utility Functions ---
 
@@ -64,10 +64,13 @@ export const useVoiceChat = () => {
     return [];
   });
   const [error, setError] = useState<string | null>(null);
-  const [sources, setSources] = useState<string[]>([]); // URLs from search results
+  const [sources, setSources] = useState<SourceInfo[]>([]); // URLs with titles from search results
   const [isSearchEnabled, setIsSearchEnabled] = useState(true); // Control for real-time search
   const [isPaused, setIsPaused] = useState(false); // Control for pausing reading
   const [isAssistantMuted, setIsAssistantMuted] = useState(false); // Control for muting assistant
+  const [isCustomSearchEnabled, setIsCustomSearchEnabled] = useState(true); // Control for Google Custom Search API - default enabled
+  const [searchResultsCache, setSearchResultsCache] = useState<{ query: string; results: SourceInfo[]; timestamp: number } | null>(null); // Cache for search results
+  const sessionRef = useRef<Session | null>(null); // Store the actual session for sending search results
 
   const sessionPromiseRef = useRef<Promise<Session> | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -257,9 +260,165 @@ export const useVoiceChat = () => {
   };
 
   const handleServerMessage = useCallback(async (message: LiveServerMessage) => {
+    // Log message structure for debugging
+    if (message.serverContent) {
+      console.log('📨 Server message:', {
+        hasInputTranscription: !!message.serverContent.inputTranscription,
+        hasOutputTranscription: !!message.serverContent.outputTranscription,
+        hasModelTurn: !!message.serverContent.modelTurn,
+        hasGroundingMetadata: !!(message.serverContent as any).groundingMetadata,
+        messageKeys: Object.keys(message.serverContent)
+      });
+
+      // Check if grounding metadata exists (indicates search was performed)
+      if ((message.serverContent as any).groundingMetadata) {
+        console.log('✅ Grounding metadata found - search was performed!', (message.serverContent as any).groundingMetadata);
+      }
+    }
+
     if (message.serverContent?.inputTranscription) {
       const text = message.serverContent.inputTranscription.text;
-      currentInputTranscriptionRef.current += text;
+      const fullTextSoFar = currentInputTranscriptionRef.current + text;
+      currentInputTranscriptionRef.current = fullTextSoFar;
+
+      // Auto-detect search requests and use Custom Search API if enabled
+      // Check both the new text and the full accumulated text
+      const searchKeywords = ['חדשות', 'מבזקים', 'חיפוש', 'מחפש', 'חדש', 'היום', 'עדכני', 'news', 'search', 'מה קורה', 'מה המצב'];
+      const isSearchRequest = searchKeywords.some(keyword =>
+        fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
+      );
+
+      // Check cache first to avoid duplicate searches
+      const cacheValid = searchResultsCache &&
+        searchResultsCache.query === fullTextSoFar.trim() &&
+        Date.now() - searchResultsCache.timestamp < 60000; // 1 minute cache
+
+      if (isSearchRequest && (isCustomSearchEnabled || isSearchEnabled) && !cacheValid) {
+        console.log('🔍 Auto-detected search request, using Custom Search API...');
+        const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+        const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
+        // Use Custom Search API if available, otherwise try Google Search Grounding
+        if (apiKey && cx) {
+          // Don't await - search in parallel so it doesn't block transcription
+          (async () => {
+            try {
+              // Build search query from user input with date
+              const now = new Date();
+              const currentDate = now.toLocaleDateString('he-IL', { year: 'numeric', month: 'long', day: 'numeric' });
+              const searchQuery = `${fullTextSoFar.trim()} ${currentDate}`;
+              const searchUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(searchQuery)}&num=10&lr=lang_he|lang_en&dateRestrict=d1`; // d1 = last 24 hours
+
+              console.log('🔍 Searching with Custom Search API:', searchQuery);
+              const response = await fetch(searchUrl);
+
+              if (response.ok) {
+                const data = await response.json();
+                if (data.items && Array.isArray(data.items) && data.items.length > 0) {
+                  console.log(`✅ Custom Search API found ${data.items.length} results`);
+                  const searchResults: SourceInfo[] = data.items
+                    .filter((item: any) => {
+                      // Filter out homepage URLs
+                      try {
+                        const urlObj = new URL(item.link || '');
+                        const path = urlObj.pathname;
+                        return path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php';
+                      } catch {
+                        return false;
+                      }
+                    })
+                    .map((item: any) => ({
+                      url: item.link || '',
+                      title: item.title || item.htmlTitle || ''
+                    }));
+
+                  if (searchResults.length > 0) {
+                    // Cache results
+                    setSearchResultsCache({
+                      query: fullTextSoFar.trim(),
+                      results: searchResults,
+                      timestamp: Date.now()
+                    });
+
+                    // Add to sources
+                    setSources(prev => {
+                      const combined = [...prev, ...searchResults];
+                      // Remove duplicates by URL
+                      const unique = combined.reduce((acc, current) => {
+                        if (!acc.find(item => item.url === current.url)) {
+                          acc.push(current);
+                        }
+                        return acc;
+                      }, [] as SourceInfo[]);
+                      return unique;
+                    });
+
+                    // Send search results to the model via text input immediately
+                    // Use the stored session reference if available, otherwise get from promise
+                    const sendSearchResults = async () => {
+                      let session = sessionRef.current;
+
+                      if (!session && sessionPromiseRef.current) {
+                        try {
+                          session = await sessionPromiseRef.current;
+                          sessionRef.current = session; // Store for future use
+                          console.log('✅ Got session from promise');
+                        } catch (err) {
+                          console.error('❌ Failed to get session:', err);
+                          return;
+                        }
+                      }
+
+                      if (!session) {
+                        console.warn('⚠️ No session available to send search results');
+                        return;
+                      }
+
+                      // Format search results for the model
+                      const resultsText = searchResults.slice(0, 5).map((result, idx) =>
+                        `כותרת ${idx + 1}: ${result.title}. מקור: ${result.url}`
+                      ).join('\n');
+
+                      const searchContextMessage = `[חיפוש בוצע - תוצאות זמינות]\n${resultsText}\n\nהשתמש בתוצאות החיפוש האלה כדי לענות על השאלה. תן את הכותרות והכתובות המלאות מהתוצאות.`;
+
+                      console.log('📤 Sending search results to model:', searchContextMessage);
+                      console.log('📤 Session state:', { hasSession: !!session, sessionType: typeof session });
+
+                      // Send as text input immediately
+                      try {
+                        session.sendRealtimeInput({
+                          text: searchContextMessage
+                        });
+                        console.log('✅ Search results sent to model successfully');
+                      } catch (err: any) {
+                        console.error('❌ Failed to send search results to model:', err);
+                        console.error('Error details:', {
+                          name: err?.name,
+                          message: err?.message,
+                          stack: err?.stack
+                        });
+                      }
+                    };
+
+                    // Send immediately
+                    sendSearchResults();
+                  }
+                } else {
+                  console.warn('⚠️ Custom Search API returned no results');
+                }
+              } else {
+                const errorText = await response.text();
+                console.error('❌ Custom Search API error:', response.status, response.statusText, errorText);
+              }
+            } catch (err) {
+              console.error('❌ Failed to search with Custom Search API:', err);
+            }
+          })();
+        } else {
+          console.warn('⚠️ Custom Search API key or CX not configured');
+        }
+      }
+
       updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
     }
 
@@ -268,24 +427,170 @@ export const useVoiceChat = () => {
       const text = message.serverContent.outputTranscription.text;
       currentOutputTranscriptionRef.current += text;
 
-      // Extract URLs from the text (look for URLs in format: http://..., https://..., or "Source: [URL]" or "מקור: [URL]")
-      // Filter out homepage URLs (like www.walla.co.il, www.ynet.co.il without paths)
-      const urlPattern = /(?:Source:\s*|From:\s*|מקור:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
-      const foundUrls = text.match(urlPattern) || [];
-      const cleanUrls = foundUrls
-        .map(url => url.replace(/^(Source:\s*|From:\s*|מקור:\s*)/i, '').trim())
-        .filter(url => {
-          // Filter out homepage URLs - keep only URLs with paths (like /news/, /item/, /article/)
-          const urlObj = new URL(url);
-          const path = urlObj.pathname;
-          // Keep URLs that have paths longer than just "/" or "/index.html"
-          return path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php';
+      // Check if the response mentions searching but no URLs were found
+      const mentionsSearch = text.toLowerCase().includes('חיפשתי') || text.toLowerCase().includes('מחפש') || text.toLowerCase().includes('חיפוש');
+      const hasNoResults = text.toLowerCase().includes('לא מצאתי') || text.toLowerCase().includes('לא נמצא');
+
+      if (mentionsSearch && hasNoResults) {
+        console.warn('⚠️ AI mentions searching but found no results - Google Search Grounding may not be working');
+        console.warn('💡 Consider using Custom Search API instead or verify Google Search Grounding is enabled in Google Cloud Console');
+      }
+
+      // Extract URLs and titles from the text
+      // Pattern 1: "כותרת: [title]. מקור: [URL]" or "כותרת: [title]\nמקור: [URL]"
+      // Pattern 2: "[title]. מקור: [URL]" or "[title]. מקור: [URL]"
+      // Pattern 3: Just URLs with "מקור:" or "Source:"
+      // Pattern 4: Direct URLs
+      // Pattern 5: Titles without URLs (will search for URL automatically)
+
+      const titleUrlPattern = /(?:כותרת:\s*([^\n.]+?)\s*[.\n]?\s*מקור:\s*|([^\n.]+?)\s*[.\n]?\s*מקור:\s*|Source:\s*([^\n.]+?)\s*[.\n]?\s*From:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+      const foundMatches: SourceInfo[] = [];
+      let match;
+
+      while ((match = titleUrlPattern.exec(text)) !== null) {
+        const title = (match[1] || match[2] || match[3] || '').trim();
+        const url = match[4]?.trim();
+
+        if (url) {
+          try {
+            const urlObj = new URL(url);
+            const path = urlObj.pathname;
+            // Filter out homepage URLs - keep only URLs with paths
+            if (path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php') {
+              foundMatches.push({
+                url: url,
+                title: title || undefined
+              });
+            }
+          } catch (e) {
+            // Invalid URL, skip
+          }
+        }
+      }
+
+      // Also try to extract standalone URLs (if no title pattern matched)
+      if (foundMatches.length === 0) {
+        const urlPattern = /(?:Source:\s*|From:\s*|מקור:\s*)?(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+        const foundUrls = text.match(urlPattern) || [];
+        foundUrls.forEach(url => {
+          const cleanUrl = url.replace(/^(Source:\s*|From:\s*|מקור:\s*)/i, '').trim();
+          try {
+            const urlObj = new URL(cleanUrl);
+            const path = urlObj.pathname;
+            if (path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php') {
+              foundMatches.push({
+                url: cleanUrl,
+                title: undefined
+              });
+            }
+          } catch (e) {
+            // Invalid URL, skip
+          }
         });
-      if (cleanUrls.length > 0) {
+      }
+
+      // Also extract titles without URLs (standalone titles mentioned in the text)
+      // Pattern: "כותרת: [title]" or numbered list like "1. [title]" or "- [title]"
+      const standaloneTitlePattern = /(?:כותרת:\s*|^[0-9]+\.\s+|^[-•]\s+)([^\n.]+?)(?:\s*[.\n]|$)/gmi;
+      const titleMatches = text.matchAll(standaloneTitlePattern);
+      for (const titleMatch of titleMatches) {
+        const title = titleMatch[1]?.trim();
+        if (title && title.length > 5 && title.length < 200) {
+          // Check if this title is not already in foundMatches
+          const alreadyExists = foundMatches.some(m => m.title === title || m.url.includes(title));
+          if (!alreadyExists) {
+            // Add as title without URL - will search for URL automatically
+            foundMatches.push({
+              url: '', // Empty URL - will be searched automatically
+              title: title
+            });
+          }
+        }
+      }
+
+      if (foundMatches.length > 0) {
         setSources(prev => {
-          const combined = [...prev, ...cleanUrls];
-          return Array.from(new Set(combined)); // Remove duplicates
+          const combined = [...prev, ...foundMatches];
+          // Remove duplicates by URL
+          const unique = combined.reduce((acc, current) => {
+            if (!acc.find(item => item.url === current.url)) {
+              acc.push(current);
+            } else {
+              // Update existing entry with title if available
+              const existing = acc.find(item => item.url === current.url);
+              if (current.title && !existing?.title) {
+                existing!.title = current.title;
+              }
+            }
+            return acc;
+          }, [] as SourceInfo[]);
+          return unique;
         });
+
+        // For entries with title but no URL (or empty URL), search for the URL automatically
+        const sourcesNeedingUrl = foundMatches.filter(s => s.title && (!s.url || s.url.length < 10));
+        if (sourcesNeedingUrl.length > 0) {
+          const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+          const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
+          if (apiKey && cx) {
+            // Search for URLs in parallel (but limit to 5 at a time to avoid rate limits)
+            sourcesNeedingUrl.slice(0, 5).forEach(async (source) => {
+              try {
+                const searchQuery = source.title || '';
+                if (!searchQuery || searchQuery.length < 3) return;
+
+                const searchUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(searchQuery)}&num=3&lr=lang_he|lang_en`;
+                const response = await fetch(searchUrl);
+
+                if (response.ok) {
+                  const data = await response.json();
+                  if (data.items && data.items.length > 0) {
+                    // Find the best matching result (prefer articles with specific paths)
+                    let bestResult = data.items[0];
+                    for (const item of data.items) {
+                      try {
+                        const urlObj = new URL(item.link);
+                        const path = urlObj.pathname;
+                        // Prefer URLs with article paths (like /news/, /item/, /article/)
+                        if (path && (path.includes('/news/') || path.includes('/item/') || path.includes('/article/'))) {
+                          bestResult = item;
+                          break;
+                        }
+                      } catch (e) {
+                        // Invalid URL, continue
+                      }
+                    }
+
+                    const foundUrl = bestResult.link;
+
+                    if (foundUrl) {
+                      try {
+                        const urlObj = new URL(foundUrl);
+                        const path = urlObj.pathname;
+                        // Only update if URL has a valid path (not homepage)
+                        if (path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php') {
+                          // Update the source with the found URL
+                          setSources(prevSources => {
+                            return prevSources.map(s =>
+                              s.title === source.title && (!s.url || s.url.length < 10)
+                                ? { ...s, url: foundUrl }
+                                : s
+                            );
+                          });
+                        }
+                      } catch (e) {
+                        // Invalid URL, skip
+                      }
+                    }
+                  }
+                }
+              } catch (err) {
+                console.error('Failed to search for URL:', err);
+              }
+            });
+          }
+        }
       }
 
       updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
@@ -340,7 +645,7 @@ export const useVoiceChat = () => {
       currentOutputTranscriptionRef.current = '';
       setStatus(AppStatus.LISTENING);
     }
-  }, [isAssistantMuted]);
+  }, [isAssistantMuted, isCustomSearchEnabled, updateTranscript, setSources]);
 
   const startConversation = useCallback(() => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
@@ -359,36 +664,94 @@ export const useVoiceChat = () => {
 
     try {
       const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      console.log('🔑 API Key check:', {
+        hasGEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+        hasAPI_KEY: !!process.env.API_KEY,
+        apiKeyLength: apiKey ? apiKey.length : 0,
+        apiKeyPrefix: apiKey ? apiKey.substring(0, 10) + '...' : 'none',
+        hostname: window.location.hostname
+      });
+
       if (!apiKey || apiKey === '') {
         const errorMsg = 'GEMINI_API_KEY is not set. ' +
           (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
             ? 'Please create a .env.local file with your Gemini API key.'
             : 'Please configure GEMINI_API_KEY in GitHub Secrets for deployment.');
+        console.error('❌ API Key Error:', errorMsg);
         throw new Error(errorMsg);
       }
+
+      console.log('✅ Initializing GoogleGenAI...');
       const ai = new GoogleGenAI({ apiKey: apiKey as string });
 
       // FIX: Add `(window as any)` to support `webkitAudioContext` in TypeScript for broader browser compatibility.
       inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
 
+      // Get current date for dynamic date filtering
+      const now = new Date();
+      const currentDate = now.toLocaleDateString('he-IL', { year: 'numeric', month: 'long', day: 'numeric' });
+      const currentYear = now.getFullYear();
+      const currentMonth = now.toLocaleDateString('he-IL', { month: 'long' });
+      const currentDay = now.getDate();
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayDate = yesterday.toLocaleDateString('he-IL', { year: 'numeric', month: 'long', day: 'numeric' });
+
+      console.log('🔍 Search configuration:', {
+        isSearchEnabled,
+        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+        hasGrounding: true
+      });
+
+      const configWithSearch = {
+        responseModalities: [Modality.AUDIO],
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+        systemInstruction: `You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled. IMPORTANT: The system automatically searches the internet when you detect search requests. When you see messages like "[חיפוש בוצע - תוצאות זמינות]" with search results, you MUST use those results in your response.
+
+CRITICAL INSTRUCTIONS:
+1. When you receive search results in the format "כותרת X: [title]. מקור: [URL]", you MUST use those exact titles and URLs in your response IMMEDIATELY. DO NOT ignore them - the search was done for you and you MUST use the results.
+2. When presenting search results, ALWAYS include the ACTUAL headlines and COMPLETE URLs from the search results you received. Format: "כותרת: [הכותרת מהחיפוש]. מקור: [כתובת URL מהחיפוש]"
+3. The current date is ${currentDate} (${currentYear}) - verify all information is from TODAY or the last 24-48 hours.
+4. NEVER use placeholders - always use the actual titles and URLs from search results.
+5. If you receive search results, mention them immediately: "חיפשתי ומצאתי את הכותרות הבאות:" followed by ALL the actual results with their URLs.
+6. When users ask about news or current events, ALWAYS use the search results provided to you. The system searches automatically when needed.
+7. IMPORTANT: When you see "[חיפוש בוצע - תוצאות זמינות]", STOP and use those results. Do NOT say you're searching - the search is already done. Just present the results.
+
+Remember: Search results are provided to you automatically - use them directly in your responses. If you see search results, you MUST include them in your answer.`,
+      };
+
+      // Enable Google Search grounding for real-time internet search (if enabled)
+      if (isSearchEnabled) {
+        (configWithSearch as any).groundingWithGoogleSearch = {
+          enabled: true,
+        };
+        console.log('✅ Google Search Grounding ENABLED');
+      } else {
+        console.log('⚠️ Google Search Grounding DISABLED');
+      }
+
       sessionPromiseRef.current = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          systemInstruction: 'You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled through Google Search Grounding. CRITICAL INSTRUCTIONS FOR REAL-TIME SEARCH - FOLLOW THESE EXACTLY: 1. ALWAYS search the internet when users ask about ANY current event, news, weather, stock prices, sports results, time/date, breaking news, or ANY topic that might require up-to-date information. 2. NEVER EVER provide information from memory or training data when the user asks about current events - ALWAYS search first, even if you think you know the answer. 3. VERIFY DATES AND TIMELINESS - Before sharing ANY information, especially about political figures, current events, or news: a) Check if the information is from TODAY or the last 24-48 hours b) Verify that political leaders mentioned are STILL in office c) Check if events mentioned are RECENT and CURRENT d) If you find information older than 48 hours, DO NOT share it - search again for CURRENT information 4. PRIORITIZE ONLY THE MOST RECENT INFORMATION: a) News articles should be from the last 24-48 hours maximum b) NEVER share articles older than 48 hours unless user explicitly asks for historical information c) If you find old articles, explicitly say: "זה מידע ישן, אני מחפש מידע עדכני מהיום" and search again d) Verify publication dates before sharing - articles must show TODAY\'s date or yesterday at most 5. FOR POLITICAL FIGURES AND CURRENT EVENTS: a) Always verify if people mentioned are STILL in their positions b) Check dates of statements or events - they must be from the last 48 hours c) If information is outdated (e.g., someone is no longer in office, event happened long ago), DO NOT share it - search for CURRENT information 6. When presenting search results, ALWAYS mention: "חיפשתי עכשיו" and the DATE/TIME: "מידע מעודכן מהיום [תאריך]". If you cannot confirm the date is from today, say "אני מחפש מידע יותר עדכני" and search again. 7. MANDATORY: When users ask about news, headlines, or current events, you MUST ALWAYS provide SPECIFIC ARTICLE URLs from the search results. NEVER say "I cannot provide specific URLs" or "I cannot read from specific sites" - you HAVE access to search results with URLs. ALWAYS include at least 2-5 SPECIFIC ARTICLE URLs in your response. Format: "מקור: [FULL ARTICLE URL]" or just include the full URL (https://...) directly in your text. The URLs MUST be specific article links (like https://www.ynet.co.il/news/article/abc123 or https://news.walla.co.il/item/1234567), NOT homepages (NOT www.ynet.co.il or www.walla.co.il). Example: "חיפשתי עכשיו. מידע מעודכן מהיום. הכותרות הראשיות: [כותרת 1]. מקור: https://www.ynet.co.il/news/article/abc123. [כותרת 2]. מקור: https://news.walla.co.il/item/1234567." 8. When users ask specifically for headlines or titles ("תקרא לי כותרות", "מה הכותרות", etc.), you MUST provide the actual headlines AND their specific article URLs. Format: "כותרת: [כותרת]. מקור: [URL]" or "כותרת: [כותרת]\nמקור: [URL]". 9. If you cannot find CURRENT information (from last 48 hours), explicitly state: "לא מצאתי מידע עדכני מהשעות האחרונות, אני אנסה לחפש שוב" and search with different terms focusing on TODAY. 10. Double-check everything you share - if you have any doubt about whether information is current, DO NOT share it - search again with emphasis on TODAY and RECENT. 11. Remember: For current events, news, and political updates, information older than 48 hours is considered OLD and should NOT be shared. Keep responses concise and informative, but always verify and emphasize that information is CURRENT and from TODAY, and ALWAYS include specific article URLs.',
-          // Enable Google Search grounding for real-time internet search (if enabled)
-          groundingWithGoogleSearch: {
-            enabled: isSearchEnabled,
-          },
-        } as any,
+        config: configWithSearch as any,
         callbacks: {
           onopen: async () => {
+            console.log('✅ WebSocket connection opened successfully');
+
+            // Store the session reference immediately
+            try {
+              const session = await sessionPromiseRef.current;
+              sessionRef.current = session;
+              console.log('✅ Session stored in ref:', { hasSession: !!session });
+            } catch (err) {
+              console.error('❌ Failed to store session:', err);
+            }
+
             setStatus(AppStatus.LISTENING);
             try {
               // Start streaming audio from microphone
+              console.log('🎤 Requesting microphone access...');
               const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
               // Verify we have valid AudioContext and MediaStream
@@ -433,8 +796,13 @@ export const useVoiceChat = () => {
               source.connect(scriptProcessorRef.current);
               scriptProcessorRef.current.connect(inputAudioContextRef.current.destination);
             } catch (error: any) {
-              console.error('Error setting up audio:', error);
-              setError(`Failed to set up microphone: ${error.message || 'Unknown error'}`);
+              console.error('❌ Error setting up audio:', error);
+              console.error('Error details:', {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+              });
+              setError(`שגיאה בהגדרת המיקרופון: ${error.message || 'שגיאה לא ידועה'}. בדוק את הקונסול (F12) לפרטים נוספים.`);
               setStatus(AppStatus.ERROR);
               cleanup();
             }
@@ -443,23 +811,38 @@ export const useVoiceChat = () => {
             handleServerMessage(message);
           },
           onerror: (e: ErrorEvent) => {
-            console.error('API Error:', e);
-            setError(`Connection error: ${e.message}`);
+            console.error('❌ API Error:', e);
+            console.error('Error details:', {
+              message: e.message,
+              error: e.error,
+              type: e.type,
+              filename: e.filename,
+              lineno: e.lineno,
+              colno: e.colno
+            });
+            setError(`שגיאת חיבור ל-API: ${e.message || 'שגיאה לא ידועה'}. בדוק את הקונסול (F12) לפרטים נוספים.`);
             setStatus(AppStatus.ERROR);
             cleanup();
           },
           onclose: () => {
-             cleanup();
+            console.log('🔌 WebSocket connection closed');
+            cleanup();
           },
         },
       });
 
-    } catch (err: any) {
-        console.error("Failed to start conversation:", err);
-        setError(err.message || 'Failed to initialize Gemini API.');
-        setStatus(AppStatus.ERROR);
+      console.log('✅ Session connection initiated');
+    } catch (error: any) {
+      console.error('❌ Failed to start conversation:', error);
+      console.error('Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
+      setError(`שגיאה בהתחלת השיחה: ${error.message || 'שגיאה לא ידועה'}. בדוק את הקונסול (F12) לפרטים נוספים.`);
+      setStatus(AppStatus.ERROR);
     }
-  }, [status, isSearchEnabled, handleServerMessage]);
+  }, [status, isSearchEnabled, isCustomSearchEnabled, handleServerMessage]);
 
   const stopConversation = useCallback(() => {
     // Stop dictation mode if active
@@ -468,8 +851,26 @@ export const useVoiceChat = () => {
       isDictationModeRef.current = false;
     }
 
+    // Close session from ref first
+    if (sessionRef.current) {
+      try {
+        sessionRef.current.close();
+        console.log('✅ Session closed from ref');
+      } catch (err) {
+        console.error('❌ Error closing session:', err);
+      }
+      sessionRef.current = null;
+    }
+
+    // Also close from promise
     if (sessionPromiseRef.current) {
-      sessionPromiseRef.current.then(session => session.close());
+      sessionPromiseRef.current.then(session => {
+        try {
+          session.close();
+        } catch (err) {
+          console.error('❌ Error closing session from promise:', err);
+        }
+      }).catch(() => {});
       sessionPromiseRef.current = null;
     }
     cleanup();
@@ -957,15 +1358,19 @@ export const useVoiceChat = () => {
     let successCount = 0;
 
     // Fetch titles with better error handling
-    for (const url of sources.slice(0, 10)) { // Limit to 10 articles
+    for (const source of sources.slice(0, 10)) { // Limit to 10 articles
       try {
-        const title = await fetchArticleTitle(url);
+        // If title already exists, use it; otherwise fetch it
+        let title = source.title;
+        if (!title) {
+          title = await fetchArticleTitle(source.url);
+        }
         if (title && title.trim() && title !== 'No title found') {
           titlesText += `${successCount + 1}. ${title.trim()}\n\n`;
           successCount++;
         }
       } catch (err) {
-        console.error(`Failed to fetch title for ${url}:`, err);
+        console.error(`Failed to fetch title for ${source.url}:`, err);
         // Continue to next article
       }
     }
@@ -1164,6 +1569,42 @@ export const useVoiceChat = () => {
     }
   }, [fetchArticleContent, isPaused, resumeReading]);
 
+  // Function to search using Google Custom Search API
+  const searchWithCustomSearch = useCallback(async (query: string): Promise<{ title: string; link: string; snippet: string }[]> => {
+    const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+    const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
+    if (!apiKey || !cx) {
+      console.warn('Google Custom Search API key or CX not configured');
+      return [];
+    }
+
+    try {
+      const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10&lr=lang_he|lang_en`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        console.error('Custom Search API error:', response.status, response.statusText);
+        return [];
+      }
+
+      const data = await response.json();
+
+      if (data.items && Array.isArray(data.items)) {
+        return data.items.map((item: any) => ({
+          title: item.title || '',
+          link: item.link || '',
+          snippet: item.snippet || ''
+        }));
+      }
+
+      return [];
+    } catch (err) {
+      console.error('Failed to search with Custom Search API:', err);
+      return [];
+    }
+  }, []);
+
   return {
     status,
     transcript,
@@ -1171,6 +1612,8 @@ export const useVoiceChat = () => {
     sources,
     isSearchEnabled,
     setIsSearchEnabled,
+    isCustomSearchEnabled,
+    setIsCustomSearchEnabled,
     isAssistantMuted,
     setIsAssistantMuted,
     startConversation,
@@ -1190,7 +1633,8 @@ export const useVoiceChat = () => {
     readTextFile,
     loadTextFile,
     readArticleTitles,
-    readFullArticle
+    readFullArticle,
+    searchWithCustomSearch
   };
 };
 

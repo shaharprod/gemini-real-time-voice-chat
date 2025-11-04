@@ -14,6 +14,8 @@ const App: React.FC = () => {
     sources,
     isSearchEnabled,
     setIsSearchEnabled,
+    isCustomSearchEnabled,
+    setIsCustomSearchEnabled,
     isAssistantMuted,
     setIsAssistantMuted,
     startConversation,
@@ -33,7 +35,8 @@ const App: React.FC = () => {
     readTextFile,
     loadTextFile,
     readArticleTitles,
-    readFullArticle
+    readFullArticle,
+    searchWithCustomSearch
   } = useVoiceChat();
   const [hasPermission, setHasPermission] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -193,6 +196,20 @@ const App: React.FC = () => {
               <SearchIcon className={`w-4 h-4 ${isSearchEnabled ? 'text-blue-400' : 'text-gray-500'}`} />
               <span className={`text-xs font-medium ${isSearchEnabled ? 'text-blue-300' : 'text-gray-400'}`}>
                 {isSearchEnabled ? 'חיפוש פעיל' : 'חיפוש כבוי'}
+              </span>
+            </button>
+            <button
+              onClick={() => setIsCustomSearchEnabled(!isCustomSearchEnabled)}
+              className={`flex items-center gap-2 px-3 py-1 rounded-lg border transition-colors ${
+                isCustomSearchEnabled
+                  ? 'bg-purple-900/30 border-purple-700/50 hover:bg-purple-900/50'
+                  : 'bg-gray-700/30 border-gray-600/50 hover:bg-gray-700/50'
+              }`}
+              title={isCustomSearchEnabled ? "כיבוי Custom Search API" : "הפעלת Custom Search API"}
+            >
+              <SearchIcon className={`w-4 h-4 ${isCustomSearchEnabled ? 'text-purple-400' : 'text-gray-500'}`} />
+              <span className={`text-xs font-medium ${isCustomSearchEnabled ? 'text-purple-300' : 'text-gray-400'}`}>
+                {isCustomSearchEnabled ? 'Custom Search' : 'Custom Search'}
               </span>
             </button>
             <button
@@ -372,22 +389,63 @@ const App: React.FC = () => {
                 לחץ על "הקרא" ליד כל כתבה כדי להקשיב לתוכן המלא
               </p>
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {sources.slice(0, 10).map((url, index) => (
-                  <div key={index} className="flex items-center gap-2 p-3 bg-gray-700/50 rounded-lg hover:bg-gray-700/70 transition-colors">
-                    <span className="text-xs text-gray-400 flex-1 truncate" title={url}>{url}</span>
-                    <button
-                      onClick={() => handleReadFullArticle(url)}
-                      disabled={isReading}
-                      className={`flex items-center gap-2 px-3 py-2 text-xs rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                        isReading
-                          ? 'bg-orange-900/30 border-orange-700/50 text-orange-300'
-                          : 'bg-orange-900/20 border-orange-700/30 text-orange-400 hover:bg-orange-900/30 hover:border-orange-700/50'
-                      }`}
-                      title="הקרא כתבה מלאה"
-                    >
-                      <SpeakerIcon className="w-4 h-4" />
-                      <span className="font-medium">{isReading ? 'קורא...' : 'הקרא'}</span>
-                    </button>
+                {sources.slice(0, 10).map((source, index) => (
+                  <div key={index} className="flex flex-col gap-2 p-3 bg-gray-700/50 rounded-lg hover:bg-gray-700/70 transition-colors">
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1 min-w-0">
+                        {source.title ? (
+                          <div className="flex flex-col gap-1">
+                            <span className="text-sm text-gray-200 font-medium line-clamp-2" title={source.title}>
+                              {source.title}
+                            </span>
+                            {source.url && source.url.length > 10 ? (
+                              <a 
+                                href={source.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-xs text-blue-400 hover:text-blue-300 truncate block"
+                                title={source.url}
+                              >
+                                {source.url}
+                              </a>
+                            ) : (
+                              <span className="text-xs text-yellow-400 italic">
+                                מחפש כתובת...
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          source.url && source.url.length > 10 ? (
+                            <a 
+                              href={source.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-400 hover:text-blue-300 truncate block"
+                              title={source.url}
+                            >
+                              {source.url}
+                            </a>
+                          ) : (
+                            <span className="text-xs text-gray-500 italic">
+                              אין כתובת זמינה
+                            </span>
+                          )
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleReadFullArticle(source.url)}
+                        disabled={isReading || !source.url || source.url.length < 10}
+                        className={`flex items-center gap-2 px-3 py-2 text-xs rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 ${
+                          isReading
+                            ? 'bg-orange-900/30 border-orange-700/50 text-orange-300'
+                            : 'bg-orange-900/20 border-orange-700/30 text-orange-400 hover:bg-orange-900/30 hover:border-orange-700/50'
+                        }`}
+                        title="הקרא כתבה מלאה"
+                      >
+                        <SpeakerIcon className="w-4 h-4" />
+                        <span className="font-medium">{isReading ? 'קורא...' : 'הקרא'}</span>
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

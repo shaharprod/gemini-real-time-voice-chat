@@ -21,3 +21,8 @@ export interface ArticleInfo {
   title: string;
   content?: string;
 }
+
+export interface SourceInfo {
+  url: string;
+  title?: string; // Optional title - will be fetched if not provided
+}
