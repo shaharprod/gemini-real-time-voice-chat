@@ -4,17 +4,25 @@ $ErrorActionPreference = "Stop"
 Write-Host "🚀 מתחיל קומיט ופוש אוטומטי..." -ForegroundColor Cyan
 Write-Host ""
 
-# בדוק אם יש remote
+# בדוק אם יש remote ותקן אם צריך
 try {
     $remote = git remote -v 2>&1 | Out-String
+    $correctUrl = "https://github.com/shaharprod/gemini-real-time-voice-chat.git"
+    
     if ($remote -match "origin") {
-        Write-Host "✅ Git remote נמצא:" -ForegroundColor Green
-        git remote -v
+        if ($remote -notmatch "shaharprod/gemini-real-time-voice-chat") {
+            Write-Host "⚠️ Remote מכוון ל-URL לא נכון, מתקן..." -ForegroundColor Yellow
+            git remote remove origin 2>&1 | Out-Null
+            git remote add origin $correctUrl
+            Write-Host "✅ Remote תוקן!" -ForegroundColor Green
+        } else {
+            Write-Host "✅ Git remote נמצא:" -ForegroundColor Green
+            git remote -v
+        }
     } else {
-        Write-Host "❌ אין git remote מוגדר!" -ForegroundColor Red
-        Write-Host "`nהוסף remote עם:" -ForegroundColor Yellow
-        Write-Host "git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git" -ForegroundColor White
-        exit 1
+        Write-Host "❌ אין git remote מוגדר, מוסיף..." -ForegroundColor Yellow
+        git remote add origin $correctUrl
+        Write-Host "✅ Remote נוסף!" -ForegroundColor Green
     }
 } catch {
     Write-Host "❌ שגיאה בבדיקת remote: $_" -ForegroundColor Red
