@@ -1,7 +1,7 @@
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-// import './index.css'; // Temporarily disabled - using CDN instead
+import './index.css';
 import App from './App';
 
 const rootElement = document.getElementById('root');

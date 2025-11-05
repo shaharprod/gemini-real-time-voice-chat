@@ -49,6 +49,75 @@ async function decodeAudioData(
 
 const STORAGE_KEY = 'gemini-voice-chat-history';
 
+// Function to fix transcription with incorrect spacing
+function fixTranscriptionSpacing(text: string): string {
+  if (!text || text.trim().length === 0) return text;
+
+  // Remove extra spaces and fix common spacing issues
+  let fixed = text.trim();
+
+  // Fix common Hebrew words that get split incorrectly
+  const commonWords: { [key: string]: string } = {
+    'ב בק שה': 'בבקשה',
+    'ב בק ש': 'בבקשה',
+    'בב קשה': 'בבקשה',
+    'ב בקשה': 'בבקשה',
+    'לינ ק': 'לינק',
+    'לינקים': 'לינקים',
+    'כות ר ות': 'כותרות',
+    'כותרות': 'כותרות',
+    'חד שות': 'חדשות',
+    'חדשות': 'חדשות',
+    'מה יום': 'מהיום',
+    'מהיום': 'מהיום',
+    'ב וי נט': 'בוינט',
+    'בו אי נט': 'בוינט',
+    'בוינט': 'בוינט',
+    'ת ני': 'תני',
+    'תני': 'תני',
+    'רוא ה': 'רואה',
+    'רואה': 'רואה',
+    'מ ל ך': 'מלך',
+    'מלך': 'מלך',
+    'ביק ש תי': 'ביקשתי',
+    'ביקשתי': 'ביקשתי',
+    'מ ווינט': 'מוינט',
+    'מוינט': 'מוינט',
+    'פשים': 'תחפשי',
+    'ת חפשי': 'תחפשי',
+    'תחפשי': 'תחפשי'
+  };
+
+  // Replace common split words
+  for (const [wrong, correct] of Object.entries(commonWords)) {
+    const regex = new RegExp(wrong.replace(/\s+/g, '\\s+'), 'gi');
+    fixed = fixed.replace(regex, correct);
+  }
+
+  // Fix spacing between Hebrew words (remove spaces within words)
+  // Pattern: Hebrew letter, space, Hebrew letter (within a word)
+  fixed = fixed.replace(/([\u0590-\u05FF])\s+([\u0590-\u05FF])/g, (match, char1, char2) => {
+    // Check if this is likely a word boundary (next char is not Hebrew) or if it's a common split
+    const before = fixed.substring(Math.max(0, fixed.indexOf(match) - 10), fixed.indexOf(match));
+    const after = fixed.substring(fixed.indexOf(match) + match.length, fixed.indexOf(match) + match.length + 10);
+
+    // If surrounded by Hebrew letters, it's likely a split word
+    if (/[\u0590-\u05FF]/.test(before) && /[\u0590-\u05FF]/.test(after)) {
+      return char1 + char2; // Remove space within word
+    }
+    return match; // Keep space if it's a word boundary
+  });
+
+  // Normalize multiple spaces to single space
+  fixed = fixed.replace(/\s+/g, ' ');
+
+  // Fix spacing around punctuation
+  fixed = fixed.replace(/\s+([.,!?;:])/g, '$1');
+  fixed = fixed.replace(/([.,!?;:])\s+/g, '$1 ');
+
+  return fixed.trim();
+}
+
 export const useVoiceChat = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [transcript, setTranscript] = useState<ConversationTurn[]>(() => {
@@ -70,7 +139,10 @@ export const useVoiceChat = () => {
   const [isPaused, setIsPaused] = useState(false); // Control for pausing reading
   const [isAssistantMuted, setIsAssistantMuted] = useState(false); // Control for muting assistant
   const [isCustomSearchEnabled, setIsCustomSearchEnabled] = useState(true); // Control for Google Custom Search API - default enabled
-  const [searchResultsCache, setSearchResultsCache] = useState<{ query: string; results: SourceInfo[]; timestamp: number } | null>(null); // Cache for search results
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'searching' | 'connected' | 'error' | 'no-api'>('idle'); // Search status indicator
+  const [lastSearchTime, setLastSearchTime] = useState<Date | null>(null); // Last successful search time
+  const [apiConnectionStatus, setApiConnectionStatus] = useState<'checking' | 'connected' | 'disconnected' | 'error'>('checking'); // API connection status
+  // Removed searchResultsCache - always perform fresh searches for real-time results
   const sessionRef = useRef<Session | null>(null); // Store the actual session for sending search results
 
   const sessionPromiseRef = useRef<Promise<Session> | null>(null);
@@ -80,12 +152,53 @@ export const useVoiceChat = () => {
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const recognitionRef = useRef<any>(null);
   const isDictationModeRef = useRef<boolean>(false);
+  const isWebSocketClosedRef = useRef<boolean>(false);
+  const audioProcessingEnabledRef = useRef<boolean>(false);
 
   const currentTurnIdRef = useRef<string | null>(null);
   const currentInputTranscriptionRef = useRef('');
   const currentOutputTranscriptionRef = useRef('');
 
   const nextStartTimeRef = useRef(0);
+
+  // בדיקה ראשונית של חיבור ל-API
+  useEffect(() => {
+    const checkApiConnection = () => {
+      const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+      const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
+      if (apiKey && cx) {
+        setApiConnectionStatus('checking');
+        // נסה לבצע חיפוש בדיקה קטן (רק לבדוק שהחיבור עובד)
+        const testUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=test&num=1`;
+        fetch(testUrl)
+          .then(response => {
+            if (response.ok) {
+              setApiConnectionStatus('connected');
+              console.log('✅ [בדיקת API] Custom Search API מחובר');
+            } else {
+              setApiConnectionStatus('error');
+              console.error('❌ [בדיקת API] שגיאה בחיבור ל-Custom Search API:', response.status);
+            }
+          })
+          .catch(err => {
+            setApiConnectionStatus('error');
+            console.error('❌ [בדיקת API] שגיאה בחיבור ל-Custom Search API:', err);
+          });
+      } else {
+        setApiConnectionStatus('disconnected');
+        console.warn('⚠️ [בדיקת API] Custom Search API לא מוגדר');
+      }
+    };
+
+    // בדוק את החיבור כשהאפליקציה נטענת
+    checkApiConnection();
+
+    // בדוק מחדש כל 30 שניות
+    const interval = setInterval(checkApiConnection, 30000);
+
+    return () => clearInterval(interval);
+  }, []);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
   // Real-time mute control: stop/start audio immediately when mute state changes
@@ -372,38 +485,82 @@ export const useVoiceChat = () => {
     }
 
     if (message.serverContent?.inputTranscription) {
-      const text = message.serverContent.inputTranscription.text;
-      const fullTextSoFar = currentInputTranscriptionRef.current + text;
-      currentInputTranscriptionRef.current = fullTextSoFar;
+      const rawText = message.serverContent.inputTranscription.text;
+      // Fix transcription spacing issues
+      const text = fixTranscriptionSpacing(rawText);
+
+      // Gemini Live API שולח את כל הטקסט עד עכשיו, לא רק את החלק החדש
+      // אם הטקסט החדש ארוך יותר או שווה לטקסט הקודם, נשתמש בו ישירות (הוא כולל את הטקסט הקודם)
+      // אם הטקסט החדש קצר יותר, נוסיף אותו לטקסט הקודם (זה רק החלק החדש)
+      // שיפור: אם הטקסט החדש מתחיל עם הטקסט הקודם, נשתמש בו ישירות (הוא עדכון מלא)
+      const fixedCurrentText = fixTranscriptionSpacing(currentInputTranscriptionRef.current);
+
+      if (text.length >= fixedCurrentText.length ||
+          text.startsWith(fixedCurrentText) ||
+          (fixedCurrentText.length > 0 && text.includes(fixedCurrentText))) {
+        // הטקסט החדש כבר כולל את הטקסט הקודם - נשתמש בו ישירות
+        currentInputTranscriptionRef.current = text;
+      } else if (text.length > 0 && fixedCurrentText.length > 0) {
+        // הטקסט החדש הוא רק החלק החדש - נוסיף אותו עם רווח
+        // וודא שלא נחתוך משפט באמצע - אם הטקסט הקודם לא מסתיים בסימן פיסוק, הוסף רווח
+        const lastChar = fixedCurrentText[fixedCurrentText.length - 1];
+        const needsSpace = !['.', '!', '?', ':', ';', ',', ' ', '\n'].includes(lastChar);
+        currentInputTranscriptionRef.current = fixedCurrentText + (needsSpace ? ' ' : '') + text;
+        // Fix spacing again after combining
+        currentInputTranscriptionRef.current = fixTranscriptionSpacing(currentInputTranscriptionRef.current);
+      } else {
+        // זה הטקסט הראשון או הטקסט החדש ריק - נשתמש בו ישירות
+        currentInputTranscriptionRef.current = text;
+      }
+      const fullTextSoFar = currentInputTranscriptionRef.current;
 
       // Auto-detect search requests and use Custom Search API if enabled
-      // Check both the new text and the full accumulated text
-      const searchKeywords = ['חדשות', 'מבזקים', 'חיפוש', 'מחפש', 'חדש', 'היום', 'עדכני', 'news', 'search', 'מה קורה', 'מה המצב', 'כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום'];
-      const isSearchRequest = searchKeywords.some(keyword =>
-        fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
-      );
-
-      // Check if it's a news request (should always search)
-      const newsKeywords = ['כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום', 'מבזקים'];
+      // זיהוי בקשות חיפוש - גם חדשות וגם חיפוש כללי
+      // מילות מפתח לחדשות - כולל וריאציות עם רווחים לא נכונים
+      const newsKeywords = ['כותרות', 'כותרת', 'כותרות', 'ynet', 'וינט', 'ויינט', 'בוינט', 'בויינט', 'מוינט', 'מויינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום', 'מבזקים', 'חדשות', 'מה המצב', 'מה קורה', 'חדשות ישראל', 'חדשות עולם', 'תחפשי', 'פשים', 'תחפש', 'חפש'];
       const isNewsRequest = newsKeywords.some(keyword =>
         fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
       );
 
-      // Force search for news requests (no cache)
-      const shouldAlwaysSearch = isNewsRequest || isSearchRequest;
+      // מילות מפתח לחיפוש כללי - מילים שמעידות על בקשה לחיפוש
+      const searchRequestKeywords = ['חפש', 'מחפש', 'חיפוש', 'search', 'find', 'מצא', 'תחפש', 'תמצא', 'תחפשי', 'תמצאי', 'תחפשו', 'תמצאו', 'חפש לי', 'מצא לי', 'חפשי לי', 'מצאי לי', 'מה זה', 'מי זה', 'איפה', 'איך', 'למה', 'מתי', 'מהו', 'מהי', 'מיהו', 'מיהי'];
+      const isGeneralSearchRequest = searchRequestKeywords.some(keyword =>
+        fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
+      );
+
+      // אם השאלה נראית כמו בקשה לחיפוש (מתחילה ב-מה/מי/איפה/איך/למה/מתי או מכילה מילות חיפוש)
+      const questionPattern = /^(מה|מי|איפה|איך|למה|מתי|מהו|מהי|מיהו|מיהי|איזה|איזו|אילו)/i;
+      const isQuestionLike = questionPattern.test(fullTextSoFar.trim()) || fullTextSoFar.length > 10;
+
+      // אם המשתמש ביקש מפורש "תחפש" או "תמצא" או שזו שאלה שנראית כמו בקשה לחיפוש
+      const shouldAlwaysSearch = isNewsRequest || isGeneralSearchRequest || (isQuestionLike && fullTextSoFar.length > 15);
 
       if (shouldAlwaysSearch && (isCustomSearchEnabled || isSearchEnabled)) {
         const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
         const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
 
+        // בדיקה מפורטת של הגדרות
+        console.log('\n🔍🔍🔍 ========================================');
+        console.log('🔍 [בדיקת חיפוש בזמן אמת]');
+        console.log('🔍 isSearchEnabled:', isSearchEnabled);
+        console.log('🔍 isCustomSearchEnabled:', isCustomSearchEnabled);
+        console.log('🔍 shouldAlwaysSearch:', shouldAlwaysSearch);
+        console.log('🔍 API Key:', apiKey ? `PRESENT (${apiKey.substring(0, 10)}...)` : 'MISSING ❌');
+        console.log('🔍 CX:', cx ? `PRESENT (${cx})` : 'MISSING ❌');
+        console.log('🔍 טקסט המשתמש:', fullTextSoFar.substring(0, 100));
+        console.log('🔍 ========================================\n');
+
         if (apiKey && cx) {
           // Don't await - search in parallel so it doesn't block transcription
           (async () => {
             try {
-              console.log('\n🔍🔍🔍 ========================================');
-              console.log('🔍 [חיפוש בזמן אמת] מתחיל חיפוש חדש!');
-              console.log('🔍 טקסט המשתמש:', fullTextSoFar.substring(0, 100));
-              console.log('🔍 ========================================\n');
+              console.log('\n✅✅✅ ========================================');
+              console.log('✅ [חיפוש בזמן אמת] מתחיל חיפוש חדש!');
+              console.log('✅ API Key: PRESENT');
+              console.log('✅ CX: PRESENT');
+              console.log('✅ טקסט המשתמש:', fullTextSoFar.substring(0, 100));
+              console.log('✅ שולח בקשה ל-Google Custom Search API...');
+              console.log('✅ ========================================\n');
 
               // Get session
               let session = sessionRef.current;
@@ -431,6 +588,38 @@ export const useVoiceChat = () => {
               };
 
               const { success, results, sentToModel } = await searchAndSendToModel(fullTextSoFar.trim(), searchConfig);
+
+              console.log('\n📊📊📊 ========================================');
+              console.log('📊 [תוצאות חיפוש]');
+              console.log('📊 success:', success);
+              console.log('📊 results.length:', results.length);
+              console.log('📊 sentToModel:', sentToModel);
+              if (results.length > 0) {
+                console.log('📊 תוצאות ראשונות:');
+                results.slice(0, 3).forEach((r, i) => {
+                  console.log(`📊   ${i + 1}. ${r.title.substring(0, 60)}`);
+                  console.log(`📊      ${r.url.substring(0, 60)}`);
+                });
+              } else {
+                console.log('⚠️ לא נמצאו תוצאות!');
+              }
+              console.log('📊 ========================================\n');
+
+              // עדכן סטטוס חיפוש
+              if (success && sentToModel && results.length > 0) {
+                setSearchStatus('connected');
+                setApiConnectionStatus('connected');
+                setLastSearchTime(new Date());
+              } else if (success && results.length > 0) {
+                setSearchStatus('error');
+                setApiConnectionStatus('error');
+              } else if (success) {
+                setSearchStatus('idle');
+                setApiConnectionStatus('connected');
+              } else {
+                setSearchStatus('error');
+                setApiConnectionStatus('error');
+              }
 
               if (success && results.length > 0) {
                 // Add to sources
@@ -460,11 +649,23 @@ export const useVoiceChat = () => {
                 console.warn('⚠️ [חיפוש בזמן אמת] לא נמצאו תוצאות או שגיאה בחיפוש');
               }
             } catch (err) {
-              console.error('❌ [חיפוש בזמן אמת] שגיאה בחיפוש:', err);
+              console.error('\n❌❌❌ ========================================');
+              console.error('❌ [שגיאה בחיפוש]');
+              console.error('❌ Error:', err);
+              console.error('❌ ========================================\n');
+              setSearchStatus('error');
+              setApiConnectionStatus('error');
             }
           })();
         } else {
-          console.warn('⚠️ Custom Search API key or CX not configured');
+          console.warn('\n⚠️⚠️⚠️ ========================================');
+          console.warn('⚠️ [Custom Search API לא מוגדר]');
+          console.warn('⚠️ API Key:', apiKey ? 'PRESENT' : 'MISSING ❌');
+          console.warn('⚠️ CX:', cx ? 'PRESENT' : 'MISSING ❌');
+          console.warn('⚠️ כדי להפעיל חיפוש, ודא שהגדרת את GOOGLE_CUSTOM_SEARCH_API_KEY ו-GOOGLE_CUSTOM_SEARCH_CX ב-.env.local');
+          console.warn('⚠️ ========================================\n');
+          setSearchStatus('no-api');
+          setApiConnectionStatus('disconnected');
         }
       }
 
@@ -564,13 +765,34 @@ export const useVoiceChat = () => {
         })();
       }
 
+      // עדכן את התמלול עם הטקסט החדש של המשתמש
       updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
     }
 
     if (message.serverContent?.outputTranscription) {
       setStatus(AppStatus.SPEAKING);
       const text = message.serverContent.outputTranscription.text;
-      currentOutputTranscriptionRef.current += text;
+      // Gemini Live API שולח את כל הטקסט עד עכשיו, לא רק את החלק החדש
+      // אם הטקסט החדש ארוך יותר או שווה לטקסט הקודם, נשתמש בו ישירות (הוא כולל את הטקסט הקודם)
+      // אם הטקסט החדש קצר יותר, נוסיף אותו לטקסט הקודם (זה רק החלק החדש)
+      // שיפור: אם הטקסט החדש מתחיל עם הטקסט הקודם, נשתמש בו ישירות (הוא עדכון מלא)
+      if (text.length >= currentOutputTranscriptionRef.current.length ||
+          text.startsWith(currentOutputTranscriptionRef.current) ||
+          (currentOutputTranscriptionRef.current.length > 0 && text.includes(currentOutputTranscriptionRef.current))) {
+        // הטקסט החדש כבר כולל את הטקסט הקודם - נשתמש בו ישירות
+        currentOutputTranscriptionRef.current = text;
+      } else if (text.length > 0 && currentOutputTranscriptionRef.current.length > 0) {
+        // הטקסט החדש הוא רק החלק החדש - נוסיף אותו עם רווח
+        // וודא שלא נחתוך משפט באמצע - אם הטקסט הקודם לא מסתיים בסימן פיסוק, הוסף רווח
+        const lastChar = currentOutputTranscriptionRef.current[currentOutputTranscriptionRef.current.length - 1];
+        const needsSpace = !['.', '!', '?', ':', ';', ',', ' ', '\n'].includes(lastChar);
+        currentOutputTranscriptionRef.current = currentOutputTranscriptionRef.current + (needsSpace ? ' ' : '') + text;
+      } else {
+        // זה הטקסט הראשון או הטקסט החדש ריק - נשתמש בו ישירות
+        currentOutputTranscriptionRef.current = text;
+      }
+      // עדכן את התמלול עם הטקסט החדש של העוזרת
+      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
 
       // Check if the response mentions searching but no URLs were found
       const mentionsSearch = text.toLowerCase().includes('חיפשתי') || text.toLowerCase().includes('מחפש') || text.toLowerCase().includes('חיפוש');
@@ -737,8 +959,6 @@ export const useVoiceChat = () => {
           }
         }
       }
-
-      updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
     }
 
     if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
@@ -850,23 +1070,49 @@ export const useVoiceChat = () => {
       });
 
       const configWithSearch = {
-        responseModalities: [Modality.AUDIO],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
+          responseModalities: [Modality.AUDIO],
+          // הפרמטרים של inputAudioTranscription ו-outputAudioTranscription לא תקפים ב-Gemini Live API
+          // השפה והתמלול נקבעים אוטומטית על ידי המודל או דרך systemInstruction
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
         systemInstruction: `את עוזרת קולית ידידותית ומועילה עם חיפוש באינטרנט בזמן אמת. חשוב: המערכת מחפשת באינטרנט אוטומטית כשאת מזהה בקשות חיפוש. כשאת רואה הודעות כמו "[חיפוש בוצע - תוצאות זמינות מהיום ${currentDay} ${currentMonth} ${currentYear}]" עם תוצאות חיפוש, את חייבת להשתמש בתוצאות האלה בתגובה שלך.
 
-הוראות קריטיות:
-1. כשאת מקבלת תוצאות חיפוש בפורמט "כותרת X: [כותרת]. מקור: [URL]", את חייבת להשתמש בכותרות ובכתובות המדויקות האלה בתגובה שלך מיד. אל תתעלמי מהן - החיפוש בוצע עבורך ואת חייבת להשתמש בתוצאות.
-2. כשאת מציגה תוצאות חיפוש, תמיד תני את הכותרות האמיתיות והכתובות המלאות מתוצאות החיפוש שקיבלת. פורמט: "כותרת: [הכותרת מהחיפוש]. מקור: [כתובת URL מהחיפוש]"
-3. התאריך היום הוא ${currentDate} (${currentDay} ${currentMonth} ${currentYear}) - ודאי שכל המידע הוא מהיום או מ-24-48 השעות האחרונות.
-4. לעולם אל תשתמשי ב-placeholders - תמיד השתמשי בכותרות ובכתובות האמיתיות מתוצאות החיפוש.
-5. אם את מקבלת תוצאות חיפוש, תני אותן מיד: "חיפשתי ומצאתי את הכותרות הבאות:" ואחר כך כל התוצאות האמיתיות עם הכתובות שלהן.
-6. כשמשתמשים שואלים על חדשות או אירועים עדכניים, תמיד השתמשי בתוצאות החיפוש שסופקו לך. המערכת מחפשת אוטומטית כשצריך.
-7. חשוב: כשאת רואה "[חיפוש בוצע - תוצאות זמינות מהיום ${currentDay} ${currentMonth} ${currentYear}]", עצרי והשתמשי בתוצאות האלה. אל תגידי שאת מחפשת - החיפוש כבר בוצע. פשוט תני את התוצאות.
-8. קריטי - קריאת כתבות: כשאת מקבלת "[תוכן מאמר מהיום]", את חייבת לקרוא את כל התוכן מילה במילה בקול! אל תסכמי ואל תגידי "אני יכולה לקרוא רק חלק" - קראי את כל התוכן שמופיע. כשאת רואה "[תוכן מאמר מהיום - חלק X מתוך Y]", קראי את החלק הזה מילה במילה, ואחר כך תקבלי את החלק הבא.
-9. כשמשתמשים מבקשים "כותרות מ-YNET" או "כותרות מ-ynet" או "מבזקים מ-וינט", חפשי כותרות מהאתר ynet.co.il ספציפית. התוצאות שתקבלי יכללו כותרות מהיום - השתמשי בהן בדיוק כפי שהן מופיעות.
+CRITICAL - תמלול מדויק בעברית: כשאת מקבלת תמלול מהמשתמש, את חייבת לתמלל את כל המילים שהוא אמר בצורה מדויקת ומלאה. חשוב מאוד:
 
-זכרי: תוצאות חיפוש מסופקות לך אוטומטית - השתמשי בהן ישירות בתגובות שלך. אם את רואה תוצאות חיפוש, את חייבת לכלול אותן בתשובה שלך.`,
+1. תמלול מילה במילה: תמיד תכתבי את כל המילים בדיוק כפי שהמשתמש אמר אותן. אל תדלגי על מילים, אל תחליפי מילים, ואל תקצרי משפטים. אם המשתמש אומר "תני לי בבקשה לינק לוויקיפדיה", תכתבי בדיוק "תני לי בבקשה לינק לוויקיפדיה" - לא "תן לי לינק" או "לינק לוויקיפדיה".
+
+2. הבנת תמלול עם רווחים לא נכונים: לפעמים התמלול יכול להיות עם רווחים לא נכונים או מילים מפורקות (למשל "לי ב בק שה לינ ק" במקום "תני לי בבקשה לינק"), אבל את חייבת להבין את המשמעות המלאה של המשפט ולהציג את התמלול המתוקן. תמיד תפרשי את המשפט המלא כפי שהמשתמש התכוון - אם המשתמש אומר "תני לי בבקשה לינק לוויקיפדיה", תפרשי את זה כבקשה למסור לינק לוויקיפדיה, גם אם התמלול נכתב "לי ב בק שה לינ ק לויקיפדיה" או "תני לי ב בק שה לינק לוויקיפדיה". תקני את התמלול והציגי אותו בצורה נכונה.
+
+3. תמלול מלא של משפטים: אל תחתכי משפטים באמצע - תמיד תחכי עד שהמשפט יהיה שלם לפני שתגיבי. אם המשתמש אומר משפט ארוך, תחכי עד שהוא מסיים את כל המשפט לפני שתעני. אל תפסיקי באמצע המשפט - תמיד תחכי לסימן הפיסוק או לסיום המשפט המלא.
+
+4. תמלול מדויק של מילים בעברית: כשאת מקבלת תמלול בעברית, תמיד תכתבי את המילים בדיוק כפי שהן נשמעות. אם המשתמש אומר "ויקיפדיה", תכתבי "ויקיפדיה" - לא "ויקי" או "פדיה". אם המשתמש אומר "בבקשה", תכתבי "בבקשה" - לא "בבק" או "שה". תמיד תכתבי את המילים המלאות והמדויקות.
+
+5. שמירה על סדר המילים: תמיד שמרי על הסדר הנכון של המילים במשפט. אם המשתמש אומר "תני לי בבקשה לינק לוויקיפדיה", תכתבי "תני לי בבקשה לינק לוויקיפדיה" - לא "לינק לי תני בבקשה ויקיפדיה".
+
+6. תמלול של כל הביטויים: אם המשתמש אומר ביטוי או משפט מלא, תכתבי את כל הביטוי בדיוק. אל תקצרי ואל תדלגי על חלקים. אם המשתמש אומר "תני לי בבקשה לינק לוויקיפדיה", תכתבי את כל המשפט הזה - לא רק חלק ממנו.
+
+CRITICAL - תשובות מלאות: תמיד תעני בצורה מלאה ומפורטת על כל בקשה של המשתמש. אל תפסיקי באמצע התשובה - תמיד סיימי את התשובה המלאה. אם המשתמש שואל שאלה, תעני עליה במלואה. אם המשתמש מבקש מידע, תני את כל המידע הרלוונטי. תמיד סיימי את התשובה שלך - אל תשאירי תשובות חלקיות.
+
+הוראות קריטיות:
+1. כשאת מקבלת תוצאות חיפוש בפורמט "כותרת X: [כותרת]. מקור: [URL]", את חייבת להשתמש בכותרות האלה בתגובה שלך מיד. אל תתעלמי מהן - החיפוש בוצע עבורך ואת חייבת להשתמש בתוצאות.
+2. כשאת מציגה תוצאות חיפוש, תמיד תני את הכותרות האמיתיות מתוצאות החיפוש שקיבלת. פורמט: "כותרת: [הכותרת מהחיפוש]".
+
+CRITICAL - איסור קריאת לינקים בקול: לעולם, בשום מקרה, בשום תנאי, אל תקריאי כתובת (URL) או לינק בקול! גם אם יש לינק בטקסט שלך, דלגי עליו לגמרי כשאת מקריאה בקול - רק תכתבי אותו בטקסט. אם המשתמש מבקש את הלינק או הכתובת (בכל דרך: "תשלחי לי את הלינק", "תן לי את הלינק", "תני לי לינק", "תן לי את הכתובת", "תני לי את הכתובת", "איפה אני יכול לקנות", "תשלחי לי את הכתובת", "תשלח לי את הלינק", "לינק", "לינ ק", "לינק לוויקיפדיה", "לינ ק לויקיפדיה", "תני לי לינק לוויקיפדיה", "תני לי ב בק שה לינק לוויקיפדיה", או כל בקשה שמזכירה "לינק", "לינ ק", "לינק", "link", "כתובת", "URL"), שלחי לו את ה-URL המלא בטקסט מיד - כתבי את הלינק המלא בתשובה שלך בדיוק כך: "הנה הלינק: https://example.com" או "הכתובת היא: https://example.com". המשתמש יראה אותו בטקסט ויוכל ללחוץ עליו. אבל כשאת מקריאה בקול - דלגי על הלינק לחלוטין! אל תגידי את הלינק בקול - אף לא מילה אחת מהלינק! חשוב: אל תגידי "הכתובת זמינה" או "הלינק זמין" - שלחי את הלינק המלא מיד!
+3. התאריך היום הוא ${currentDate} (${currentDay} ${currentMonth} ${currentYear}) - ודאי שכל המידע הוא מהיום או מ-24-48 השעות האחרונות.
+4. לעולם אל תשתמשי ב-placeholders - תמיד השתמשי בכותרות האמיתיות מתוצאות החיפוש.
+5. אם את מקבלת תוצאות חיפוש, תני אותן מיד: "חיפשתי ומצאתי את הכותרות הבאות:" ואחר כך כל התוצאות האמיתיות לפי סדר ההופעה (תוצאה 1, תוצאה 2, תוצאה 3, וכו' עד תוצאה 10) - רק הכותרות, לא הכתובות. תמיד תני את הכותרות לפי הסדר שהגיעו מהחיפוש.
+6. כשמשתמשים שואלים על חדשות או אירועים עדכניים, תמיד השתמשי בתוצאות החיפוש שסופקו לך. המערכת מחפשת אוטומטית כשצריך.
+7. חשוב: כשאת רואה "[חיפוש בוצע - תוצאות זמינות מהיום ${currentDay} ${currentMonth} ${currentYear}]", עצרי והשתמשי בתוצאות האלה. אל תגידי שאת מחפשת - החיפוש כבר בוצע. פשוט תני את התוצאות - רק כותרות, לא כתובות.
+8. קריטי - קריאת כתבות: כשאת מקבלת "[תוכן מאמר מהיום]", את חייבת לקרוא את כל התוכן מילה במילה בקול! אל תסכמי ואל תגידי "אני יכולה לקרוא רק חלק" - קראי את כל התוכן שמופיע. כשאת רואה "[תוכן מאמר מהיום - חלק X מתוך Y]", קראי את החלק הזה מילה במילה, ואחר כך תקבלי את החלק הבא.
+9. כשמשתמשים מבקשים "כותרות מ-YNET" או "כותרות מ-ynet" או "מבזקים מ-וינט", חפשי כותרות מהאתר ynet.co.il ספציפית. התוצאות שתקבלי יכללו כותרות מהיום - השתמשי בהן בדיוק כפי שהן מופיעות, אבל רק את הכותרות, לא את הכתובות.
+
+זכרי: תוצאות חיפוש מסופקות לך אוטומטית - השתמשי בהן ישירות בתגובות שלך. אם את רואה תוצאות חיפוש, את חייבת לכלול אותן בתשובה שלך - אבל רק כותרות, לא כתובות! אלא אם המשתמש מבקש את הלינק או הכתובת (בכל דרך, כולל עם רווחים לא נכונים) - אז שלחי לו את ה-URL המלא בטקסט מיד.
+
+CRITICAL - איסור קריאת לינקים בקול: לעולם, בשום מקרה, בשום תנאי, אל תקריאי כתובת (URL) או לינק בקול! גם אם יש לינק בטקסט שלך, דלגי עליו לגמרי כשאת מקריאה בקול - רק תכתבי אותו בטקסט. אל תגידי את הלינק בקול - אף לא מילה אחת מהלינק!
+
+CRITICAL - הבנת בקשות לינק: אם המשתמש מבקש לינק (בכל דרך: "לינק", "לינ ק", "תני לי לינק", "תן לי לינק", "תשלחי לי לינק", "תשלח לי לינק", "תני לי ב בק שה לינק", "תן לי ב בק שה לינק", "לינק לוויקיפדיה", "לינ ק לויקיפדיה", "תני לי לינק לוויקיפדיה", "תני לי ב בק שה לינק לוויקיפדיה", "תן לי לינק לוויקיפדיה", או כל בקשה שמזכירה "לינק", "לינ ק", "link", "כתובת", "URL"), את חייבת לשלוח את הלינק המלא מיד - לא רק להגיד שהוא זמין, אלא לכתוב אותו במלואו: "הנה הלינק: https://..." או "הכתובת היא: https://...". המשתמש יראה אותו בטקסט ויוכל ללחוץ עליו.
+
+CRITICAL - איסור קריאת לינקים בקול: לעולם, בשום מקרה, בשום תנאי, אל תקריאי כתובת (URL) או לינק בקול! גם אם יש לינק בטקסט שלך, דלגי עליו לגמרי כשאת מקריאה בקול - רק תכתבי אותו בטקסט. אל תגידי את הלינק בקול - אף לא מילה אחת מהלינק! כשאת רואה לינק בטקסט - דלגי עליו לחלוטין בקריאה בקול!`,
       };
 
       // Enable Google Search grounding for real-time internet search (if enabled)
@@ -886,20 +1132,75 @@ export const useVoiceChat = () => {
           onopen: async () => {
             console.log('✅ WebSocket connection opened successfully');
 
+            // סמן את ה-WebSocket כפתוח
+            isWebSocketClosedRef.current = false;
+
             // Store the session reference immediately
             try {
               const session = await sessionPromiseRef.current;
-              sessionRef.current = session;
-              console.log('✅ Session stored in ref:', { hasSession: !!session });
+              if (session && !isWebSocketClosedRef.current) {
+                sessionRef.current = session;
+                console.log('✅ Session stored in ref:', { hasSession: !!session });
+              } else {
+                console.warn('⚠️ Session not stored - WebSocket closed or session invalid');
+                return;
+              }
             } catch (err) {
               console.error('❌ Failed to store session:', err);
+              isWebSocketClosedRef.current = true;
+              return;
+            }
+
+            // וודא שה-WebSocket עדיין פתוח לפני שמתחילים לשלוח אודיו
+            if (isWebSocketClosedRef.current) {
+              console.warn('⚠️ WebSocket closed before audio setup - stopping');
+              return;
             }
 
             setStatus(AppStatus.LISTENING);
             try {
-              // Start streaming audio from microphone
-              console.log('🎤 Requesting microphone access...');
-              const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // Start streaming audio from microphone
+              console.log('🎤 Requesting microphone access with high quality settings...');
+              // Try to get high-quality audio stream with optimal settings for transcription
+              let mediaStream: MediaStream;
+              try {
+                // First attempt: optimal settings for speech recognition
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                  audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 16000, // Optimal for speech recognition
+                    channelCount: 1, // Mono for better transcription
+                    sampleSize: 16
+                  }
+                });
+                console.log('✅ High-quality microphone settings applied');
+              } catch (err: any) {
+                console.warn('⚠️ High-quality settings failed, trying basic settings:', err);
+                // Fallback to basic audio if optimal settings fail
+                try {
+                  mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                      echoCancellation: true,
+                      noiseSuppression: true,
+                      autoGainControl: true
+                    }
+                  });
+                  console.log('✅ Basic microphone settings applied');
+                } catch (fallbackErr: any) {
+                  console.warn('⚠️ Basic settings failed, using minimal audio:', fallbackErr);
+                  // Final fallback: minimal audio
+                  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                }
+              }
+
+              // בדיקה נוספת אחרי קבלת המיקרופון
+              if (isWebSocketClosedRef.current) {
+                console.warn('⚠️ WebSocket closed after microphone access - stopping');
+                mediaStream.getTracks().forEach(track => track.stop());
+                return;
+              }
 
               // Verify we have valid AudioContext and MediaStream
               if (!inputAudioContextRef.current) {
@@ -925,22 +1226,85 @@ export const useVoiceChat = () => {
               const source = inputAudioContextRef.current.createMediaStreamSource(mediaStream);
               scriptProcessorRef.current = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
 
-              scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
-                const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-                const l = inputData.length;
-                const int16 = new Int16Array(l);
-                for (let i = 0; i < l; i++) {
-                  int16[i] = inputData[i] * 32768;
-                }
-                const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+            // איפוס flag שמסמן מתי האודיו יכול להתחיל להישלח
+            audioProcessingEnabledRef.current = false;
 
-                if (sessionPromiseRef.current) {
-                  sessionPromiseRef.current.then((session) => {
-                    session.sendRealtimeInput({ media: pcmBlob });
-                  });
+            // הוסף delay קצר לפני שמתחילים לשלוח אודיו
+            // זה נותן ל-WebSocket זמן להתחבר ולהתכונן
+            setTimeout(() => {
+              if (!isWebSocketClosedRef.current && sessionRef.current) {
+                audioProcessingEnabledRef.current = true;
+                console.log('✅ Audio processing enabled');
+              } else {
+                console.warn('⚠️ Audio processing not enabled - WebSocket closed or no session');
+              }
+            }, 500); // 500ms delay
+
+            scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
+              // בדוק אם האודיו יכול להתחיל להישלח
+              if (!audioProcessingEnabledRef.current) {
+                return;
+              }
+
+              // בדוק אם ה-WebSocket עדיין פתוח - בדיקה ראשונה
+              if (isWebSocketClosedRef.current) {
+                audioProcessingEnabledRef.current = false;
+                return;
+              }
+
+              // בדוק אם יש session זמין ב-ref (יותר מהיר)
+              const currentSession = sessionRef.current;
+              if (!currentSession) {
+                // אם אין session ב-ref, אל תנסה לשלוח
+                audioProcessingEnabledRef.current = false;
+                return;
+              }
+
+              // בדיקה נוספת לפני השליחה - וודא שה-WebSocket עדיין פתוח
+              if (isWebSocketClosedRef.current) {
+                audioProcessingEnabledRef.current = false;
+                return;
+              }
+
+              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+              const l = inputData.length;
+              const int16 = new Int16Array(l);
+              for (let i = 0; i < l; i++) {
+                int16[i] = inputData[i] * 32768;
+              }
+              const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+
+              // נסה לשלוח דרך session ב-ref (יש לנו אותו כי בדקנו קודם)
+              try {
+                // בדיקה אחרונה לפני השליחה
+                if (isWebSocketClosedRef.current) {
+                  return;
                 }
-              };
-              source.connect(scriptProcessorRef.current);
+                currentSession.sendRealtimeInput({ media: pcmBlob });
+              } catch (err: any) {
+                // אם ה-WebSocket נסגר, סמן אותו כסגור והפסק את העיבוד
+                if (err?.message?.includes('CLOSING') || err?.message?.includes('CLOSED') ||
+                    err?.message?.includes('WebSocket') || err?.name === 'InvalidStateError') {
+                  // סמן את ה-WebSocket כסגור והפסק את עיבוד האודיו
+                  isWebSocketClosedRef.current = true;
+                  audioProcessingEnabledRef.current = false;
+                  // הפסק את עיבוד האודיו
+                  if (scriptProcessorRef.current) {
+                    try {
+                      scriptProcessorRef.current.disconnect();
+                    } catch (disconnectErr) {
+                      // אל תדפיס שגיאה - זה תקין
+                    }
+                    scriptProcessorRef.current = null;
+                  }
+                  // אל תדפיס שגיאה - זה תקין שהקשר נסגר
+                  return;
+                }
+                // אם זו שגיאה אחרת, דפיס אותה
+                console.error('❌ [Audio] שגיאה בשליחת אודיו:', err);
+              }
+            };
+            source.connect(scriptProcessorRef.current);
               scriptProcessorRef.current.connect(inputAudioContextRef.current.destination);
             } catch (error: any) {
               console.error('❌ Error setting up audio:', error);
@@ -967,13 +1331,27 @@ export const useVoiceChat = () => {
               lineno: e.lineno,
               colno: e.colno
             });
+            // סמן את ה-WebSocket כסגור
+            isWebSocketClosedRef.current = true;
             setError(`שגיאת חיבור ל-API: ${e.message || 'שגיאה לא ידועה'}. בדוק את הקונסול (F12) לפרטים נוספים.`);
             setStatus(AppStatus.ERROR);
             cleanup();
           },
-          onclose: () => {
-            console.log('🔌 WebSocket connection closed');
-            cleanup();
+          onclose: (event: CloseEvent) => {
+            console.log('🔌 WebSocket connection closed', {
+              code: event?.code,
+              reason: event?.reason,
+              wasClean: event?.wasClean
+            });
+            // סמן את ה-WebSocket כסגור
+            isWebSocketClosedRef.current = true;
+            audioProcessingEnabledRef.current = false;
+            // רק נקרא cleanup אם זה לא סגירה תקינה (code 1000)
+            // אם זה סגירה תקינה, אולי זה חלק מתהליך הרגיל
+            if (event?.code !== 1000) {
+              console.warn('⚠️ WebSocket closed unexpectedly:', event?.code, event?.reason);
+              cleanup();
+            }
           },
         },
       });
@@ -987,11 +1365,15 @@ export const useVoiceChat = () => {
         stack: error.stack
       });
       setError(`שגיאה בהתחלת השיחה: ${error.message || 'שגיאה לא ידועה'}. בדוק את הקונסול (F12) לפרטים נוספים.`);
-      setStatus(AppStatus.ERROR);
+        setStatus(AppStatus.ERROR);
     }
   }, [status, isSearchEnabled, isCustomSearchEnabled, handleServerMessage]);
 
   const stopConversation = useCallback(() => {
+    // סמן את ה-WebSocket כסגור מיד
+    isWebSocketClosedRef.current = true;
+    audioProcessingEnabledRef.current = false;
+
     // Stop dictation mode if active
     if (isDictationModeRef.current && recognitionRef.current) {
       recognitionRef.current.stop();
@@ -1024,6 +1406,10 @@ export const useVoiceChat = () => {
   }, []);
 
   const cleanup = useCallback(() => {
+    // סמן את ה-WebSocket כסגור
+    isWebSocketClosedRef.current = true;
+    audioProcessingEnabledRef.current = false;
+
     // Stop dictation mode
     if (recognitionRef.current) {
       try {
@@ -1402,8 +1788,8 @@ export const useVoiceChat = () => {
           // Fallback timeout
           setTimeout(() => resolve(), 1000);
         }
-      });
-    };
+    });
+  };
 
     await loadVoices();
 
@@ -1622,6 +2008,80 @@ export const useVoiceChat = () => {
     }
   }, [fetchArticleContent, isPaused, resumeReading]);
 
+  // Function to send text message manually to the model
+  const sendTextMessage = useCallback(async (text: string): Promise<boolean> => {
+    if (!text || text.trim().length === 0) {
+      console.warn('⚠️ [שליחת טקסט] טקסט ריק');
+      return false;
+    }
+
+    // Get session
+    let session = sessionRef.current;
+    if (!session && sessionPromiseRef.current) {
+      try {
+        session = await sessionPromiseRef.current;
+        sessionRef.current = session;
+      } catch (err) {
+        console.error('❌ [שליחת טקסט] שגיאה בקבלת session:', err);
+        return false;
+      }
+    }
+
+    if (!session) {
+      console.warn('⚠️ [שליחת טקסט] אין session זמין - השיחה לא פעילה');
+      return false;
+    }
+
+    try {
+      console.log('📤 [שליחת טקסט] שולח טקסט למודל:', text.substring(0, 100));
+
+      // Check if this is a search request and trigger search if needed
+      const searchKeywords = ['חדשות', 'מבזקים', 'חיפוש', 'מחפש', 'חדש', 'היום', 'עדכני', 'news', 'search', 'מה קורה', 'מה המצב', 'כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום', 'מה המצב', 'מה קורה בעולם', 'מה חדש בעולם', 'חדשות ישראל', 'מה קורה בישראל'];
+      const isSearchRequest = searchKeywords.some(keyword =>
+        text.toLowerCase().includes(keyword.toLowerCase())
+      );
+
+      const newsKeywords = ['כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום', 'מבזקים', 'חדשות', 'מה המצב', 'מה קורה'];
+      const isNewsRequest = newsKeywords.some(keyword =>
+        text.toLowerCase().includes(keyword.toLowerCase())
+      );
+
+      const shouldSearch = isNewsRequest || isSearchRequest;
+
+      // If it's a search request, trigger search first
+      if (shouldSearch && (isCustomSearchEnabled || isSearchEnabled)) {
+        const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+        const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+
+        if (apiKey && cx) {
+          console.log('🔍 [שליחת טקסט] מזהה בקשה לחיפוש - מתחיל חיפוש...');
+          const searchConfig: SearchConfig = {
+            apiKey,
+            cx,
+            session,
+            sessionPromise: sessionPromiseRef.current
+          };
+
+          // Perform search in parallel (don't await)
+          searchAndSendToModel(text.trim(), searchConfig).catch(err => {
+            console.error('❌ [שליחת טקסט] שגיאה בחיפוש:', err);
+          });
+        }
+      }
+
+      // Send text to model
+      session.sendRealtimeInput({
+        text: text.trim()
+      });
+
+      console.log('✅ [שליחת טקסט] טקסט נשלח למודל בהצלחה!');
+      return true;
+    } catch (error: any) {
+      console.error('❌ [שליחת טקסט] שגיאה בשליחת טקסט:', error);
+      return false;
+    }
+  }, [isCustomSearchEnabled, isSearchEnabled]);
+
   // Function to search using Google Custom Search API
   const searchWithCustomSearch = useCallback(async (query: string): Promise<{ title: string; link: string; snippet: string }[]> => {
     const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
@@ -1662,13 +2122,15 @@ export const useVoiceChat = () => {
     status,
     transcript,
     error,
-    sources,
     isSearchEnabled,
     setIsSearchEnabled,
     isCustomSearchEnabled,
     setIsCustomSearchEnabled,
     isAssistantMuted,
     setIsAssistantMuted,
+    searchStatus,
+    apiConnectionStatus,
+    lastSearchTime,
     startConversation,
     startDictationOnly,
     stopConversation,
@@ -1685,9 +2147,8 @@ export const useVoiceChat = () => {
     readingProgress,
     readTextFile,
     loadTextFile,
-    readArticleTitles,
-    readFullArticle,
-    searchWithCustomSearch
+    searchWithCustomSearch,
+    sendTextMessage
   };
 };
 
