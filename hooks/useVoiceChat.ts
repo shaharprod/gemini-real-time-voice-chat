@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from "@google/genai";
 import { AppStatus, ConversationTurn, SourceInfo } from '../types';
+import { searchAndSendToModel, sendArticleContentToModel, SearchConfig } from './internetSearch';
 
 // --- Audio Utility Functions ---
 
@@ -259,6 +260,100 @@ export const useVoiceChat = () => {
     });
   };
 
+  // Function to fetch article content from URL (must be defined before handleServerMessage)
+  const fetchArticleContent = useCallback(async (url: string): Promise<string | null> => {
+    // Try multiple proxy services as fallback
+    const proxies = [
+      `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    ];
+
+    for (const proxyUrl of proxies) {
+      try {
+        console.log(`Trying proxy: ${proxyUrl.substring(0, 50)}...`);
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+        });
+
+        if (!response.ok) {
+          console.warn(`Proxy failed with status ${response.status}`);
+          continue;
+        }
+
+        let htmlContent: string;
+        if (proxyUrl.includes('allorigins.win')) {
+          const data = await response.json();
+          htmlContent = data.contents || '';
+        } else {
+          htmlContent = await response.text();
+        }
+
+        if (!htmlContent || htmlContent.length < 100) {
+          console.warn('Proxy returned empty or very short content');
+          continue;
+        }
+
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+
+        // Remove unwanted elements
+        const unwantedSelectors = 'script, style, nav, footer, header, aside, .comments, .social-share, .advertisement, [class*="ad"], iframe, noscript';
+        doc.querySelectorAll(unwantedSelectors).forEach(el => el.remove());
+
+        // Try multiple selectors for article content (prioritize more specific ones)
+        const articleContent =
+          // Ynet specific
+          doc.querySelector('.art_body_content')?.textContent ||
+          doc.querySelector('[class*="articleBody"]')?.textContent ||
+          doc.querySelector('[id*="article"]')?.textContent ||
+          // Generic article selectors
+          doc.querySelector('article')?.textContent ||
+          doc.querySelector('.article-content')?.textContent ||
+          doc.querySelector('.article-body')?.textContent ||
+          doc.querySelector('.post-content')?.textContent ||
+          doc.querySelector('[class*="article"]')?.textContent ||
+          doc.querySelector('[class*="content"]')?.textContent ||
+          doc.querySelector('main')?.textContent ||
+          doc.querySelector('.main-content')?.textContent ||
+          // Fallback to body but clean it better
+          (() => {
+            const body = doc.body?.textContent || '';
+            // Try to remove navigation, ads, etc. from body text
+            return body.replace(/^\s*(?:קרא עוד|עוד בחדשות|פרסומת|תגובות|שתף|like|share).*$/gmi, '').trim();
+          })();
+
+        if (articleContent && articleContent.length > 50) {
+          // Clean up the text
+          const cleaned = articleContent
+            .replace(/\s+/g, ' ')
+            .replace(/\n\s*\n/g, '\n')
+            .replace(/[^\u0590-\u05FF\u0020-\u007F\n]/g, '') // Keep Hebrew, English, and basic punctuation
+            .trim();
+
+          if (cleaned.length > 100) {
+            console.log(`Successfully fetched article content (${cleaned.length} chars)`);
+            return cleaned.substring(0, 10000); // Limit to 10000 characters
+          }
+        }
+
+        console.warn('Could not find article content in HTML');
+        // If we got HTML but couldn't extract content, try next proxy
+        continue;
+      } catch (err) {
+        console.error(`Proxy error for ${proxyUrl.substring(0, 50)}:`, err);
+        continue;
+      }
+    }
+
+    // All proxies failed
+    console.error('All proxies failed to fetch article content');
+    return null;
+  }, []);
+
   const handleServerMessage = useCallback(async (message: LiveServerMessage) => {
     // Log message structure for debugging
     if (message.serverContent) {
@@ -283,140 +378,190 @@ export const useVoiceChat = () => {
 
       // Auto-detect search requests and use Custom Search API if enabled
       // Check both the new text and the full accumulated text
-      const searchKeywords = ['חדשות', 'מבזקים', 'חיפוש', 'מחפש', 'חדש', 'היום', 'עדכני', 'news', 'search', 'מה קורה', 'מה המצב'];
+      const searchKeywords = ['חדשות', 'מבזקים', 'חיפוש', 'מחפש', 'חדש', 'היום', 'עדכני', 'news', 'search', 'מה קורה', 'מה המצב', 'כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום'];
       const isSearchRequest = searchKeywords.some(keyword =>
         fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
       );
 
-      // Check cache first to avoid duplicate searches
-      const cacheValid = searchResultsCache &&
-        searchResultsCache.query === fullTextSoFar.trim() &&
-        Date.now() - searchResultsCache.timestamp < 60000; // 1 minute cache
+      // Check if it's a news request (should always search)
+      const newsKeywords = ['כותרות', 'כותרת', 'ynet', 'וינט', 'יי נט', 'why net', 'כותרת ראשית', 'כתבה ראשית', 'מה חדש', 'מה קרה', 'חדשות היום', 'מבזקים'];
+      const isNewsRequest = newsKeywords.some(keyword =>
+        fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
+      );
 
-      if (isSearchRequest && (isCustomSearchEnabled || isSearchEnabled) && !cacheValid) {
-        console.log('🔍 Auto-detected search request, using Custom Search API...');
+      // Force search for news requests (no cache)
+      const shouldAlwaysSearch = isNewsRequest || isSearchRequest;
+
+      if (shouldAlwaysSearch && (isCustomSearchEnabled || isSearchEnabled)) {
         const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
         const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
 
-        // Use Custom Search API if available, otherwise try Google Search Grounding
         if (apiKey && cx) {
           // Don't await - search in parallel so it doesn't block transcription
           (async () => {
             try {
-              // Build search query from user input with date
-              const now = new Date();
-              const currentDate = now.toLocaleDateString('he-IL', { year: 'numeric', month: 'long', day: 'numeric' });
-              const searchQuery = `${fullTextSoFar.trim()} ${currentDate}`;
-              const searchUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(searchQuery)}&num=10&lr=lang_he|lang_en&dateRestrict=d1`; // d1 = last 24 hours
+              console.log('\n🔍🔍🔍 ========================================');
+              console.log('🔍 [חיפוש בזמן אמת] מתחיל חיפוש חדש!');
+              console.log('🔍 טקסט המשתמש:', fullTextSoFar.substring(0, 100));
+              console.log('🔍 ========================================\n');
 
-              console.log('🔍 Searching with Custom Search API:', searchQuery);
-              const response = await fetch(searchUrl);
+              // Get session
+              let session = sessionRef.current;
+              if (!session && sessionPromiseRef.current) {
+                try {
+                  session = await sessionPromiseRef.current;
+                  sessionRef.current = session;
+                } catch (err) {
+                  console.error('❌ Failed to get session:', err);
+                  return;
+                }
+              }
 
-              if (response.ok) {
-                const data = await response.json();
-                if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-                  console.log(`✅ Custom Search API found ${data.items.length} results`);
-                  const searchResults: SourceInfo[] = data.items
-                    .filter((item: any) => {
-                      // Filter out homepage URLs
-                      try {
-                        const urlObj = new URL(item.link || '');
-                        const path = urlObj.pathname;
-                        return path && path.length > 1 && path !== '/' && path !== '/index.html' && path !== '/index.php';
-                      } catch {
-                        return false;
-                      }
-                    })
-                    .map((item: any) => ({
-                      url: item.link || '',
-                      title: item.title || item.htmlTitle || ''
-                    }));
+              if (!session) {
+                console.warn('⚠️ No session available for search');
+                return;
+              }
 
-                  if (searchResults.length > 0) {
-                    // Cache results
-                    setSearchResultsCache({
-                      query: fullTextSoFar.trim(),
-                      results: searchResults,
-                      timestamp: Date.now()
-                    });
+              // Use the new search mechanism
+              const searchConfig: SearchConfig = {
+                apiKey,
+                cx,
+                session,
+                sessionPromise: sessionPromiseRef.current
+              };
 
-                    // Add to sources
-                    setSources(prev => {
-                      const combined = [...prev, ...searchResults];
-                      // Remove duplicates by URL
-                      const unique = combined.reduce((acc, current) => {
-                        if (!acc.find(item => item.url === current.url)) {
-                          acc.push(current);
-                        }
-                        return acc;
-                      }, [] as SourceInfo[]);
-                      return unique;
-                    });
+              const { success, results, sentToModel } = await searchAndSendToModel(fullTextSoFar.trim(), searchConfig);
 
-                    // Send search results to the model via text input immediately
-                    // Use the stored session reference if available, otherwise get from promise
-                    const sendSearchResults = async () => {
-                      let session = sessionRef.current;
+              if (success && results.length > 0) {
+                // Add to sources
+                const searchResults: SourceInfo[] = results.map(result => ({
+                  url: result.url,
+                  title: result.title
+                }));
 
-                      if (!session && sessionPromiseRef.current) {
-                        try {
-                          session = await sessionPromiseRef.current;
-                          sessionRef.current = session; // Store for future use
-                          console.log('✅ Got session from promise');
-                        } catch (err) {
-                          console.error('❌ Failed to get session:', err);
-                          return;
-                        }
-                      }
+                setSources(prev => {
+                  const combined = [...prev, ...searchResults];
+                  // Remove duplicates by URL
+                  const unique = combined.reduce((acc, current) => {
+                    if (!acc.find(item => item.url === current.url)) {
+                      acc.push(current);
+                    }
+                    return acc;
+                  }, [] as SourceInfo[]);
+                  return unique;
+                });
 
-                      if (!session) {
-                        console.warn('⚠️ No session available to send search results');
-                        return;
-                      }
-
-                      // Format search results for the model
-                      const resultsText = searchResults.slice(0, 5).map((result, idx) =>
-                        `כותרת ${idx + 1}: ${result.title}. מקור: ${result.url}`
-                      ).join('\n');
-
-                      const searchContextMessage = `[חיפוש בוצע - תוצאות זמינות]\n${resultsText}\n\nהשתמש בתוצאות החיפוש האלה כדי לענות על השאלה. תן את הכותרות והכתובות המלאות מהתוצאות.`;
-
-                      console.log('📤 Sending search results to model:', searchContextMessage);
-                      console.log('📤 Session state:', { hasSession: !!session, sessionType: typeof session });
-
-                      // Send as text input immediately
-                      try {
-                        session.sendRealtimeInput({
-                          text: searchContextMessage
-                        });
-                        console.log('✅ Search results sent to model successfully');
-                      } catch (err: any) {
-                        console.error('❌ Failed to send search results to model:', err);
-                        console.error('Error details:', {
-                          name: err?.name,
-                          message: err?.message,
-                          stack: err?.stack
-                        });
-                      }
-                    };
-
-                    // Send immediately
-                    sendSearchResults();
-                  }
+                if (sentToModel) {
+                  console.log('✅✅✅ [חיפוש בזמן אמת] תוצאות נשלחו למודל בהצלחה!');
                 } else {
-                  console.warn('⚠️ Custom Search API returned no results');
+                  console.warn('⚠️ [חיפוש בזמן אמת] תוצאות נמצאו אבל לא נשלחו למודל');
                 }
               } else {
-                const errorText = await response.text();
-                console.error('❌ Custom Search API error:', response.status, response.statusText, errorText);
+                console.warn('⚠️ [חיפוש בזמן אמת] לא נמצאו תוצאות או שגיאה בחיפוש');
               }
             } catch (err) {
-              console.error('❌ Failed to search with Custom Search API:', err);
+              console.error('❌ [חיפוש בזמן אמת] שגיאה בחיפוש:', err);
             }
           })();
         } else {
           console.warn('⚠️ Custom Search API key or CX not configured');
         }
+      }
+
+      // Check if user wants to read an article
+      const readArticleKeywords = ['תקראי לי', 'תקרי לי', 'תקראי את', 'תקרי את', 'קרא לי', 'קרא את', 'כתבה ראשית', 'כותרת ראשית', 'תקראי את הכתבה', 'תקרי את הכתבה', 'לא מעניין אותי המקור תקראי את הכתבה'];
+      const userWantsToReadArticle = readArticleKeywords.some(keyword =>
+        fullTextSoFar.toLowerCase().includes(keyword.toLowerCase())
+      );
+
+      if (userWantsToReadArticle) {
+        // Don't await - read in parallel so it doesn't block transcription
+        (async () => {
+          try {
+            console.log('📖 [קריאת כתבה] מזהה בקשה לקריאת כתבה');
+
+            // Get session
+            let session = sessionRef.current;
+            if (!session && sessionPromiseRef.current) {
+              try {
+                session = await sessionPromiseRef.current;
+                sessionRef.current = session;
+              } catch (err) {
+                console.error('❌ [קריאת כתבה] שגיאה בקבלת session:', err);
+                return;
+              }
+            }
+
+            if (!session) {
+              console.warn('⚠️ [קריאת כתבה] אין session זמין');
+              return;
+            }
+
+            // Find the article URL - prioritize from sources or assistant's output
+            let articleUrl: string | null = null;
+            let articleTitle: string | null = null;
+
+            // First, try to find URL from sources (most recent first)
+            if (sources.length > 0) {
+              const firstSource = sources[0];
+              if (firstSource.url && firstSource.url.length > 10) {
+                articleUrl = firstSource.url;
+                articleTitle = firstSource.title || null;
+                console.log('📖 [קריאת כתבה] נמצא URL ממקורות:', articleUrl);
+              }
+            }
+
+            // If no URL found, check if user mentioned a specific URL in their request
+            if (!articleUrl) {
+              const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+              const urlMatches = fullTextSoFar.match(urlPattern);
+              if (urlMatches && urlMatches.length > 0) {
+                articleUrl = urlMatches[0];
+                console.log('📖 [קריאת כתבה] נמצא URL מהקלט:', articleUrl);
+              }
+            }
+
+            if (!articleUrl) {
+              console.warn('⚠️ [קריאת כתבה] לא נמצא URL לקריאה');
+              return;
+            }
+
+            // Fetch article content
+            console.log('📖 [קריאת כתבה] מביא תוכן מהכתובת:', articleUrl);
+            const content = await fetchArticleContent(articleUrl);
+
+            if (!content || content.length < 50) {
+              console.warn('⚠️ [קריאת כתבה] לא הצלחתי להביא תוכן מהכתבה');
+              return;
+            }
+
+            console.log(`📖 [קריאת כתבה] תוכן התקבל: ${content.length} תווים`);
+
+            // Send article content to model using sendArticleContentToModel
+            const apiKey = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY || '';
+            const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX || '';
+            const searchConfig: SearchConfig = {
+              apiKey,
+              cx,
+              session,
+              sessionPromise: sessionPromiseRef.current
+            };
+
+            const success = await sendArticleContentToModel(
+              content,
+              articleTitle || 'כתבה',
+              searchConfig
+            );
+
+            if (success) {
+              console.log('✅✅✅ [קריאת כתבה] תוכן נשלח למודל בהצלחה!');
+            } else {
+              console.error('❌ [קריאת כתבה] שגיאה בשליחת תוכן למודל');
+            }
+          } catch (err) {
+            console.error('❌ [קריאת כתבה] שגיאה בקריאת כתבה:', err);
+          }
+        })();
       }
 
       updateTranscript(currentInputTranscriptionRef.current, currentOutputTranscriptionRef.current, false);
@@ -645,7 +790,7 @@ export const useVoiceChat = () => {
       currentOutputTranscriptionRef.current = '';
       setStatus(AppStatus.LISTENING);
     }
-  }, [isAssistantMuted, isCustomSearchEnabled, updateTranscript, setSources]);
+  }, [isAssistantMuted, isCustomSearchEnabled, isSearchEnabled, updateTranscript, setSources, sources, fetchArticleContent]);
 
   const startConversation = useCallback(() => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR) return;
@@ -708,18 +853,20 @@ export const useVoiceChat = () => {
         responseModalities: [Modality.AUDIO],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        systemInstruction: `You are a friendly and helpful voice assistant with REAL-TIME INTERNET SEARCH enabled. IMPORTANT: The system automatically searches the internet when you detect search requests. When you see messages like "[חיפוש בוצע - תוצאות זמינות]" with search results, you MUST use those results in your response.
+        systemInstruction: `את עוזרת קולית ידידותית ומועילה עם חיפוש באינטרנט בזמן אמת. חשוב: המערכת מחפשת באינטרנט אוטומטית כשאת מזהה בקשות חיפוש. כשאת רואה הודעות כמו "[חיפוש בוצע - תוצאות זמינות מהיום ${currentDay} ${currentMonth} ${currentYear}]" עם תוצאות חיפוש, את חייבת להשתמש בתוצאות האלה בתגובה שלך.
 
-CRITICAL INSTRUCTIONS:
-1. When you receive search results in the format "כותרת X: [title]. מקור: [URL]", you MUST use those exact titles and URLs in your response IMMEDIATELY. DO NOT ignore them - the search was done for you and you MUST use the results.
-2. When presenting search results, ALWAYS include the ACTUAL headlines and COMPLETE URLs from the search results you received. Format: "כותרת: [הכותרת מהחיפוש]. מקור: [כתובת URL מהחיפוש]"
-3. The current date is ${currentDate} (${currentYear}) - verify all information is from TODAY or the last 24-48 hours.
-4. NEVER use placeholders - always use the actual titles and URLs from search results.
-5. If you receive search results, mention them immediately: "חיפשתי ומצאתי את הכותרות הבאות:" followed by ALL the actual results with their URLs.
-6. When users ask about news or current events, ALWAYS use the search results provided to you. The system searches automatically when needed.
-7. IMPORTANT: When you see "[חיפוש בוצע - תוצאות זמינות]", STOP and use those results. Do NOT say you're searching - the search is already done. Just present the results.
+הוראות קריטיות:
+1. כשאת מקבלת תוצאות חיפוש בפורמט "כותרת X: [כותרת]. מקור: [URL]", את חייבת להשתמש בכותרות ובכתובות המדויקות האלה בתגובה שלך מיד. אל תתעלמי מהן - החיפוש בוצע עבורך ואת חייבת להשתמש בתוצאות.
+2. כשאת מציגה תוצאות חיפוש, תמיד תני את הכותרות האמיתיות והכתובות המלאות מתוצאות החיפוש שקיבלת. פורמט: "כותרת: [הכותרת מהחיפוש]. מקור: [כתובת URL מהחיפוש]"
+3. התאריך היום הוא ${currentDate} (${currentDay} ${currentMonth} ${currentYear}) - ודאי שכל המידע הוא מהיום או מ-24-48 השעות האחרונות.
+4. לעולם אל תשתמשי ב-placeholders - תמיד השתמשי בכותרות ובכתובות האמיתיות מתוצאות החיפוש.
+5. אם את מקבלת תוצאות חיפוש, תני אותן מיד: "חיפשתי ומצאתי את הכותרות הבאות:" ואחר כך כל התוצאות האמיתיות עם הכתובות שלהן.
+6. כשמשתמשים שואלים על חדשות או אירועים עדכניים, תמיד השתמשי בתוצאות החיפוש שסופקו לך. המערכת מחפשת אוטומטית כשצריך.
+7. חשוב: כשאת רואה "[חיפוש בוצע - תוצאות זמינות מהיום ${currentDay} ${currentMonth} ${currentYear}]", עצרי והשתמשי בתוצאות האלה. אל תגידי שאת מחפשת - החיפוש כבר בוצע. פשוט תני את התוצאות.
+8. קריטי - קריאת כתבות: כשאת מקבלת "[תוכן מאמר מהיום]", את חייבת לקרוא את כל התוכן מילה במילה בקול! אל תסכמי ואל תגידי "אני יכולה לקרוא רק חלק" - קראי את כל התוכן שמופיע. כשאת רואה "[תוכן מאמר מהיום - חלק X מתוך Y]", קראי את החלק הזה מילה במילה, ואחר כך תקבלי את החלק הבא.
+9. כשמשתמשים מבקשים "כותרות מ-YNET" או "כותרות מ-ynet" או "מבזקים מ-וינט", חפשי כותרות מהאתר ynet.co.il ספציפית. התוצאות שתקבלי יכללו כותרות מהיום - השתמשי בהן בדיוק כפי שהן מופיעות.
 
-Remember: Search results are provided to you automatically - use them directly in your responses. If you see search results, you MUST include them in your answer.`,
+זכרי: תוצאות חיפוש מסופקות לך אוטומטית - השתמשי בהן ישירות בתגובות שלך. אם את רואה תוצאות חיפוש, את חייבת לכלול אותן בתשובה שלך.`,
       };
 
       // Enable Google Search grounding for real-time internet search (if enabled)
@@ -1215,100 +1362,6 @@ Remember: Search results are provided to you automatically - use them directly i
       console.error('Failed to fetch article title:', err);
       return null;
     }
-  }, []);
-
-  // Function to fetch article content from URL
-  const fetchArticleContent = useCallback(async (url: string): Promise<string | null> => {
-    // Try multiple proxy services as fallback
-    const proxies = [
-      `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-      `https://corsproxy.io/?${encodeURIComponent(url)}`,
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    ];
-
-    for (const proxyUrl of proxies) {
-      try {
-        console.log(`Trying proxy: ${proxyUrl.substring(0, 50)}...`);
-        const response = await fetch(proxyUrl, {
-          method: 'GET',
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-        });
-
-        if (!response.ok) {
-          console.warn(`Proxy failed with status ${response.status}`);
-          continue;
-        }
-
-        let htmlContent: string;
-        if (proxyUrl.includes('allorigins.win')) {
-          const data = await response.json();
-          htmlContent = data.contents || '';
-        } else {
-          htmlContent = await response.text();
-        }
-
-        if (!htmlContent || htmlContent.length < 100) {
-          console.warn('Proxy returned empty or very short content');
-          continue;
-        }
-
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlContent, 'text/html');
-
-        // Remove unwanted elements
-        const unwantedSelectors = 'script, style, nav, footer, header, aside, .comments, .social-share, .advertisement, [class*="ad"], iframe, noscript';
-        doc.querySelectorAll(unwantedSelectors).forEach(el => el.remove());
-
-        // Try multiple selectors for article content (prioritize more specific ones)
-        const articleContent =
-          // Ynet specific
-          doc.querySelector('.art_body_content')?.textContent ||
-          doc.querySelector('[class*="articleBody"]')?.textContent ||
-          doc.querySelector('[id*="article"]')?.textContent ||
-          // Generic article selectors
-          doc.querySelector('article')?.textContent ||
-          doc.querySelector('.article-content')?.textContent ||
-          doc.querySelector('.article-body')?.textContent ||
-          doc.querySelector('.post-content')?.textContent ||
-          doc.querySelector('[class*="article"]')?.textContent ||
-          doc.querySelector('[class*="content"]')?.textContent ||
-          doc.querySelector('main')?.textContent ||
-          doc.querySelector('.main-content')?.textContent ||
-          // Fallback to body but clean it better
-          (() => {
-            const body = doc.body?.textContent || '';
-            // Try to remove navigation, ads, etc. from body text
-            return body.replace(/^\s*(?:קרא עוד|עוד בחדשות|פרסומת|תגובות|שתף|like|share).*$/gmi, '').trim();
-          })();
-
-        if (articleContent && articleContent.length > 50) {
-          // Clean up the text
-          const cleaned = articleContent
-            .replace(/\s+/g, ' ')
-            .replace(/\n\s*\n/g, '\n')
-            .replace(/[^\u0590-\u05FF\u0020-\u007F\n]/g, '') // Keep Hebrew, English, and basic punctuation
-            .trim();
-
-          if (cleaned.length > 100) {
-            console.log(`Successfully fetched article content (${cleaned.length} chars)`);
-            return cleaned.substring(0, 10000); // Limit to 10000 characters
-          }
-        }
-
-        console.warn('Could not find article content in HTML');
-        // If we got HTML but couldn't extract content, try next proxy
-        continue;
-      } catch (err) {
-        console.error(`Proxy error for ${proxyUrl.substring(0, 50)}:`, err);
-        continue;
-      }
-    }
-
-    // All proxies failed
-    console.error('All proxies failed to fetch article content');
-    return null;
   }, []);
 
   // Function to read article titles aloud
